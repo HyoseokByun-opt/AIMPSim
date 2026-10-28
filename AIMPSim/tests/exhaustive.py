@@ -76,8 +76,8 @@ class Case:
         self.sweep, self.text, self.exp, self.allow_ask = sweep, text, exp, allow_ask
 
 
-def grade(case, planner, validate):
-    it = parse(case.text, planner.lex)
+def grade(case, planner, validate, read=None):
+    it = read(case.text) if read else parse(case.text, planner.lex)
     r = planner.resolve(it, {"_auto": True})
     p = r["payload"]
     e = case.exp
@@ -613,11 +613,28 @@ def main():
     ap.add_argument("--sweep", default="")
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--show", type=int, default=12)
+    ap.add_argument("--llm", nargs=2, metavar=("SERVER_EXE", "MODEL"), help="read with the local model first (reader.py)")
+    ap.add_argument("--threads", type=int, default=6)
+    ap.add_argument("--sample", type=int, default=0, help="a random sample of this many requests per sweep")
     a = ap.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)
     host = host_for(find_mpsim())
     lex = Lexicon(host.get("library") or [])
     planner = Planner(lex, {"cores": 18})
     validate = host.get("validate")
+    read, asst = None, None
+    if a.llm:
+        from aimpsim.llm import LocalLLM
+        from aimpsim.web import Assistant
+        asst = Assistant({"cores": 18, "library": host.get("library")})
+        asst.llm = LocalLLM({"server_exe": a.llm[0], "model": a.llm[1], "threads": a.threads, "timeout_s": 300})
+        if not asst.llm._start():
+            sys.exit("the model server did not start")
+
+        def read(text):
+            r = asst.interpret(text, new=True)
+            return asst.sessions[r["session_id"]]["intent"]
+    rnd = random.Random(int(os.environ.get("AIMPSIM_SEED") or 1))
     t0 = time.time()
     total = collections.Counter()
     bad_all = 0
@@ -625,10 +642,12 @@ def main():
         if a.sweep and a.sweep != name:
             continue
         cases = fn(lex)
+        if a.sample and len(cases) > a.sample:
+            cases = rnd.sample(cases, a.sample)
         cnt = collections.Counter()
         fails = []
         for c in cases:
-            g, why = grade(c, planner, validate)
+            g, why = grade(c, planner, validate, read)
             if g == "asked!" and not c.allow_ask:
                 g = "miss" if "noise" not in c.sweep else g
             cnt[g] += 1
@@ -647,6 +666,8 @@ def main():
     print(f"\n{n} requests: ok {total['ok']}, asked {total['asked']}, "
           f"wrong {total['wrong']}, missed {total['miss']}, asked without cause {total['asked!']}, refused by MPSim {total['mpsim']} "
           f"({time.time() - t0:.0f} s)")
+    if asst is not None:
+        asst.llm.close()
     return 1 if bad_all else 0
 
 

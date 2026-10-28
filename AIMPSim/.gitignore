@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 aimpsim_config.json
 .vscode/
+
+# the model and llama-server ship in the release, not in the repository
+llm/

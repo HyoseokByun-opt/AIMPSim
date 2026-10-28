@@ -3,16 +3,17 @@
 A request such as "에폭시에 구형 알루미나 55 vol%, 열전도도 구해줘" or "epoxy
 with 60 vol% silica, thermal conductivity and CTE" is read into an MPSim
 case - a run, a DOE study, a calibration or an optimisation - summarised,
-and run when the user agrees. The reading is done by rules that tolerate
-typing errors and the many ways a number is written; an optional local
-language model (offline, llama.cpp) helps with what the rules leave open.
+and run when the user agrees. A small local language model shipped with
+AIMPSim (offline, llama.cpp) reads the request, however it is written; rules
+check what it read against the sentence (reader.py) and read alone when
+there is no model.
 
 AIMPSim is used with the latest MPSim: MPSim finds it beside itself and
 shows it as the AI tab (between Home and Material).
 """
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 MPSIM_MIN = "5.6.3"
 
 

@@ -14,8 +14,10 @@ AIMPSim\\ (the lexicon, the tests and the Korean guide) and in the README's
 examples of requests.
 
 The offline package is MPSim's (tools\\make_download.py) with AIMPSim\\ added,
-zipped as AIMPSim-<version>-offline-win64.zip; the release also carries
-MPSim's user guides and SHA256SUMS.txt.
+the local model included (AIMPSim\\llm\\: llama-server and one GGUF model, put
+there by AIMPSim\\get_model.py), zipped as AIMPSim-<version>-offline-win64.zip
+under GitHub's 2 GiB per file; the release also carries MPSim's user guides
+and SHA256SUMS.txt. The repository leaves llm\\ out.
 """
 from __future__ import annotations
 
@@ -34,7 +36,9 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 import make_github as MG  # noqa: E402
 
 AI_SKIP = {"aimpsim_config.json", "README.md"}
-STORED = (".whl", ".zip", ".7z", ".gz", ".png", ".jpg", ".pdf")
+AI_SKIP_DIRS = {"llm"}                 # the model ships in the release, not in the repository
+STORED = (".whl", ".zip", ".7z", ".gz", ".png", ".jpg", ".pdf", ".gguf")
+GITHUB_ASSET_MAX = 2 * 2**30           # GitHub: every file of a release under 2 GiB
 
 
 def version():
@@ -45,7 +49,7 @@ def version():
 def copy_ai(dst):
     n = 0
     for base, dirs, files in os.walk(AI):
-        dirs[:] = [d for d in dirs if d not in MG.SKIP_DIRS]
+        dirs[:] = [d for d in dirs if d not in MG.SKIP_DIRS and not (base == AI and d in AI_SKIP_DIRS)]
         rel = os.path.relpath(base, AI)
         os.makedirs(os.path.join(dst, rel), exist_ok=True)
         for f in files:
@@ -104,8 +108,45 @@ def sha256(path):
     return h.hexdigest()
 
 
+def bundled_model():
+    """(llama-server folder, model file) in AIMPSim/llm/, or (None, None)."""
+    b = os.path.join(AI, "llm", "bin", "llama-server.exe")
+    md = os.path.join(AI, "llm", "models")
+    ggufs = sorted(f for f in os.listdir(md) if f.endswith(".gguf")) if os.path.isdir(md) else []
+    return (os.path.dirname(b), os.path.join(md, ggufs[0])) if os.path.isfile(b) and len(ggufs) == 1 else (None, None)
+
+
+# the larger model as an add-on: its GGUF split in parts under 2 GiB (llama-gguf-split), each zipped
+# with its place in the package, so that unzipping them next to the package puts them in AIMPSim/llm/models
+ADDON = {"key": "qwen3.5-4b", "dir": os.path.join(os.path.dirname(ROOT), "LLM", "split4b"),
+         "license": os.path.join(os.path.dirname(ROOT), "LLM", "licenses", "LICENSE_Qwen_Qwen3.5-4B")}
+
+
+def model_addon(v, top):
+    if not os.path.isdir(ADDON["dir"]):
+        print("no add-on model (LLM/split4b)")
+        return []
+    parts = sorted(f for f in os.listdir(ADDON["dir"]) if f.endswith(".gguf"))
+    out = []
+    for i, f in enumerate(parts, 1):
+        name = f"AIMPSim-{v}-model-{ADDON['key']}-part{i}of{len(parts)}.zip"
+        with zipfile.ZipFile(os.path.join(REL, name), "w", zipfile.ZIP_STORED) as z:
+            z.write(os.path.join(ADDON["dir"], f), f"{top}/AIMPSim/llm/models/{f}")
+            if i == 1 and os.path.isfile(ADDON["license"]):
+                z.write(ADDON["license"], f"{top}/AIMPSim/llm/models/LICENSE-{ADDON['key']}")
+        if os.path.getsize(os.path.join(REL, name)) >= GITHUB_ASSET_MAX:
+            sys.exit(f"{name}: over 2 GiB")
+        out.append(name)
+    return out
+
+
 def release():
     import make_download
+    bindir, model = bundled_model()
+    if model is None:
+        sys.exit("AIMPSim/llm/ holds no model: run  python AIMPSim/get_model.py  first "
+                 "(the offline package carries the model)")
+    print(f"model: {os.path.basename(model)} ({os.path.getsize(model) / 2**30:.2f} GB), llama-server from {bindir}")
     if make_download.main():
         return 1
     v = version()
@@ -130,11 +171,13 @@ def release():
                 z.write(os.path.join(base, f), f"{top}/AIMPSim/" + rel.replace(os.sep, "/"))
         z.write(os.path.join(AI, "README.md"), f"{top}/README_AIMPSim.md")
     os.replace(zpath + ".part", zpath)
+    if os.path.getsize(zpath) >= GITHUB_ASSET_MAX:
+        sys.exit(f"{zname}: {os.path.getsize(zpath) / 2**30:.2f} GB - a GitHub release file must stay under 2 GiB")
     with zipfile.ZipFile(zpath) as z:
         bad = z.testzip()
     if bad:
         sys.exit(f"{zname}: damaged entry {bad}")
-    names = [zname]
+    names = [zname] + model_addon(v, top)
     for lang in ("EN", "KO"):
         name = f"MPSim-User-Guide-{lang}.pdf"
         shutil.copy2(os.path.join(ROOT, "docs", f"USER_GUIDE_{lang}.pdf"), os.path.join(REL, name))

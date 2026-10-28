@@ -98,7 +98,7 @@ MATERIALS = {
     "alloy42": {"ko": ["알로이42", "42합금", "리드프레임합금"], "en": ["alloy 42", "alloy42"], "formula": []},
     "egain": {"ko": ["액체금속", "갈륨인듐", "이가인"], "en": ["liquid metal", "egain", "gallium indium"], "formula": ["EGaIn"]},
     # ---- carbon ----
-    "cnt": {"ko": ["탄소나노튜브", "씨엔티", "다중벽탄소나노튜브", "나노튜브"], "en": ["carbon nanotube", "carbon nanotubes",
+    "cnt": {"ko": ["탄소나노튜브", "카본나노튜브", "씨엔티", "다중벽탄소나노튜브", "나노튜브"], "en": ["carbon nanotube", "carbon nanotubes",
             "mwcnt", "nanotube"], "formula": ["CNT", "MWCNT"]},
     "graphite": {"ko": ["흑연", "그라파이트", "그래핀", "그래핀나노플레이트렛", "지엔피"], "en": ["graphite", "graphene",
                  "graphene nanoplatelet", "gnp"], "formula": ["GNP"]},
@@ -258,6 +258,7 @@ DISTRIBUTION = {"lognormal": {"ko": ["로그정규", "로그 정규", "로그노
 # Korean particles and fillers of speech stripped off a word before matching
 PARTICLES = ["에다가", "으로써", "에서는", "으로는", "이라는", "이라고", "만큼의", "정도의", "만큼", "정도", "쯤", "에다", "으로", "에서", "부터",
              "까지", "에는", "에게", "이고", "이며", "이랑", "하고", "와의", "과의", "로서", "로써", "이나", "이다",
+             "입니다", "이에요", "예요", "이야", "야",
              "은", "는", "이", "가", "을", "를", "에", "의", "와", "과", "로", "도", "만", "랑", "씩", "고", "나"]
 # words that never name a material (kept out of fuzzy matching)
 STOP = {"ko": ["해줘", "구해줘", "계산", "계산해줘", "해석", "해석해줘", "시뮬레이션", "물성", "복합재", "복합제", "복합체",

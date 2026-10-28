@@ -21,6 +21,7 @@ import re
 
 from .lang import AN_NAME, QUALITY_NAME, SHAPE_NAME, SRC, TASK_NAME, name, t
 from .numbers import as_content, quantities, to_um
+from .reader import COMPARE, MIXED
 from .textnorm import normalize
 
 DEFAULT_SIZE_UM = 10.0            # MPSim's own default particle size
@@ -32,6 +33,7 @@ PORE_ANALYSES = {"permeability", "filtration", "tortuosity", "acoustics", "radia
 PROP_OF = {"thermal": "k", "electrical": "sigma", "dielectric": "eps_r", "magnetic": "mu_r", "cte": "E",
            "mechtest": "E", "emi": "sigma", "joule": "sigma", "moisture": "D_w", "thermomech": "E"}
 DOE_MAX = 64
+PROP_UNIT = {"k": "W/m·K", "sigma": "S/m", "E": "GPa", "alpha": "ppm/K", "rho": "g/cm³", "cp": "J/kg·K"}
 
 
 def _lab(lang, ko, en):
@@ -86,6 +88,42 @@ class Planner:
         if not matrix_id and not any(q["id"] == "matrix" for q in Q):
             ask("matrix", t("q_matrix", lang), [opt(c, self.mname(c), self.mname(c), c == "epoxy") for c in MATRIX_CHOICES])
 
+        mprops = (mx or {}).get("props") if matrix_id and (mx or {}).get("id") == matrix_id else None
+        if mprops:
+            lib = self.props(matrix_id)
+            notes.append(_lab(lang, f"{self.mname(matrix_id)}: " + ", ".join(
+                f"{k} = {v:g} {PROP_UNIT.get(k, '')} (입력값, 라이브러리 {lib.get(k, '-')})" for k, v in mprops.items()),
+                f"{self.mname(matrix_id)}: " + ", ".join(f"{k} = {v:g} {PROP_UNIT.get(k, '')} (your value; library {lib.get(k, '-')})"
+                                                         for k, v in mprops.items())))
+        rep_ = it.get("llm_report") or {}
+        for what, a, b in rep_.get("differs") or []:
+            if what == "matrix":
+                notes.append(_lab(lang, f"AI 판단: 매트릭스 {self.mname(b)} (규칙으로는 {self.mname(a)})",
+                                  f"AI reading: matrix {self.mname(b)} (the rules read {self.mname(a)})"))
+            elif what.startswith("content:"):
+                m = what.split(":", 1)[1]
+                notes.append(_lab(lang, f"AI 판단: {self.mname(m)} {b:g}% (규칙으로는 {a:g}%)",
+                                  f"AI reading: {self.mname(m)} {b:g}% (the rules read {a:g}%)"))
+            elif what.startswith("content_rules:"):
+                m = what.split(":", 1)[1]
+                notes.append(_lab(lang, f"{self.mname(m)} {b:g}%: 문장에 % 단위로 쓴 값 (AI 계산 {a:g}%는 쓰지 않음)",
+                                  f"{self.mname(m)} {b:g}%: the value written with % (the AI's calculation {a:g}% not used)"))
+            elif what == "analyses_rules":
+                notes.append(_lab(lang, "문장에 쓴 해석 이름을 따름: " + ", ".join(name(AN_NAME, k, "ko") for k in b)
+                                  + " (AI는 " + ", ".join(name(AN_NAME, k, "ko") for k in a) + ")",
+                                  "the analyses named in the sentence: " + ", ".join(name(AN_NAME, k, "en") for k in b)
+                                  + " (the AI read " + ", ".join(name(AN_NAME, k, "en") for k in a) + ")"))
+            elif what == "filler_removed":
+                notes.append(_lab(lang, f"AI 판단: {self.mname(a)}은(는) 넣지 않음 (빼거나 바꾼다고 읽음)",
+                                  f"AI reading: no {self.mname(a)} (read as taken back or replaced)"))
+            elif what == "analyses":
+                notes.append(_lab(lang, "AI 판단: 해석 " + ", ".join(name(AN_NAME, k, "ko") for k in b)
+                                  + " (규칙으로는 " + (", ".join(name(AN_NAME, k, "ko") for k in a) or "-") + ")",
+                                  "AI reading: analyses " + ", ".join(name(AN_NAME, k, "en") for k in b)
+                                  + " (the rules read " + (", ".join(name(AN_NAME, k, "en") for k in a) or "-") + ")"))
+        for d in rep_.get("dropped") or []:
+            notes.append(_lab(lang, f"문장에 없는 값이라 쓰지 않음: {d}", f"not in the sentence, not used: {d}"))
+
         # ---- fillers ----
         fl = []
         slots = list(it.get("fillers") or [])
@@ -117,7 +155,7 @@ class Planner:
             elif s.get("content"):
                 c = dict(s["content"])
                 c["src"] = "rule" if c.get("how") in ("fraction", "bare", "phr") else (
-                    "derived" if c.get("how") == "derived" else "text")
+                    "derived" if c.get("how") == "derived" else "llm" if c.get("how") == "llm_derived" else "text")
                 if c.get("how") == "derived":
                     notes.append(_lab(lang, f"{fname} 함량 = {c['raw']}% = {c['value']:g}%",
                                       f"{fname} content = {c['raw']}% = {c['value']:g}%"))
@@ -163,9 +201,33 @@ class Planner:
                         essential=False, default="10")
                     size, zsrc = DEFAULT_SIZE_UM, "default"
             f["size_um"], f["size_src"] = size, zsrc
-            for k in ("aspect", "length_um", "thickness_um", "std_um", "cv", "size_range", "size_levels"):
+            for k in ("aspect", "length_um", "thickness_um", "std_um", "cv", "size_range", "size_levels", "props"):
                 f[k] = s.get(k)
+            if f.get("props") and fid:
+                lib = self.props(fid)
+                notes.append(_lab(lang, f"{fname}: " + ", ".join(
+                    f"{k} = {v:g} {PROP_UNIT.get(k, '')} (입력값, 라이브러리 {lib.get(k, '-')})" for k, v in f["props"].items()),
+                    f"{fname}: " + ", ".join(f"{k} = {v:g} {PROP_UNIT.get(k, '')} (your value; library {lib.get(k, '-')})"
+                                             for k, v in f["props"].items())))
             fl.append(f)
+
+        # ---- a comparison of alternatives: each on its own, never one mixture ----
+        compare = None
+        named = [f for f in fl if f.get("id")]
+        text_ = it.get("text") or ""
+        if len({f["id"] for f in named}) >= 2 and (it.get("task") or "run") == "run" \
+                and (it.get("compare") or (COMPARE.search(text_) and not MIXED.search(text_))):
+            pick = ans.get("compare") or ("each" if auto else None)
+            if pick == "each":
+                compare = "each"
+            elif pick and any(f["id"] == pick for f in named):
+                fl = [f for f in fl if f.get("id") == pick]
+            else:
+                names = ", ".join(f["name"] for f in named)
+                ask("compare", t("q_compare", lang, names=names),
+                    [opt("each", f"각각 따로 ({len(named)}건)", f"each on its own ({len(named)} runs)", True)]
+                    + [opt(f["id"], f"{f['name']}만", f"only {f['name']}") for f in named], free=False)
+                compare = "each"
 
         # ---- basis ----
         basis_q = ans.get("basis")
@@ -200,7 +262,7 @@ class Planner:
                                   f"{f['name']} {v:g} phr → {100 * v / (100 + tot):.2f} wt%"))
 
         # ---- totals ----
-        for bs in ("vol", "wt"):
+        for bs in (() if compare else ("vol", "wt")):
             tot = sum(f["content"]["value"] for f in fl if f.get("content") and (f["content"].get("basis") or "vol") == bs)
             if tot >= 100.0:
                 problems.append(_lab(lang, f"필러 함량의 합이 {tot:g} {bs}%로 100% 이상입니다. 함량을 다시 알려 주세요.",
@@ -302,7 +364,10 @@ class Planner:
         quality, qsrc, qwhy = ans.get("quality"), "answer", ""
         if not quality and it.get("quality"):
             quality, qsrc = it["quality"], "text"
-        rec_q, rec_why = self.auto_quality(fl, an, matrix_id, n_cases, lang)
+        # a comparison runs each filler on its own: the accuracy level of the densest one
+        rec_q, rec_why = (max((self.auto_quality([f], an, matrix_id, n_cases, lang) for f in fl),
+                              key=lambda q: ("fast", "standard", "accurate").index(q[0]))
+                          if compare and fl else self.auto_quality(fl, an, matrix_id, n_cases, lang))
         if not quality:
             if auto:
                 quality, qsrc, qwhy = rec_q, "auto", rec_why
@@ -331,18 +396,34 @@ class Planner:
         # ---- the payload ----
         open_essential = [q for q in Q if q["essential"]]
         payload = None
+        if compare:
+            notes.insert(0, _lab(lang, f"비교: {', '.join(f['name'] for f in fl)} 각각 따로 {len(fl)}건 (섞지 않음)",
+                                 f"comparison: {', '.join(f['name'] for f in fl)}, each on its own - {len(fl)} runs (not mixed)"))
+        for mid, v, how in (it.get("llm_report") or {}).get("derived") or []:
+            notes.append(_lab(lang, f"AI 계산: {self.mname(mid)} {v:g}% ({how})", f"AI calculation: {self.mname(mid)} {v:g}% ({how})"))
+        for r_ in (it.get("llm_report") or {}).get("restored") or []:
+            notes.append(_lab(lang, f"모델이 빠뜨려 규칙으로 보충: {r_}", f"left out by the model, kept from the rules: {r_}"))
         summary = self._summary(it, lang, task, matrix_id, matrix_src, fl, an, quality, qsrc, qwhy, par, psrc,
                                 rec_par_txt, doe, cal, optz, film_um, notes, n_cases)
         if not open_essential and matrix_id and fl and all(f["id"] and f["content"] for f in fl):
             try:
-                payload = self._payload(it, lang, task, matrix_id, fl, an, quality, par, doe, cal, optz, film_um)
+                if compare:
+                    # one run per alternative, queued one after the other
+                    runs = [self._payload(it, lang, task, matrix_id, [f], an, quality, par, doe, cal, optz, film_um)
+                            for f in fl]
+                    payload = runs[0]
+                    payload["more_forms"] = [r["form"] for r in runs[1:]]
+                else:
+                    payload = self._payload(it, lang, task, matrix_id, fl, an, quality, par, doe, cal, optz, film_um)
                 payload["settings_src"] = psrc
             except ValueError as e:
                 problems.append(str(e))
             if payload is not None and self.host.get("validate") and not problems:
-                err = self.host["validate"](payload["form"])
-                if err:
-                    problems.append(err)
+                for fm in [payload["form"]] + list(payload.get("more_forms") or []):
+                    err = self.host["validate"](fm)
+                    if err:
+                        problems.append(err)
+                        break
             if payload is not None and self.host.get("plan") and not problems:
                 try:
                     pl = self.host["plan"](payload["form"])
@@ -534,6 +615,8 @@ class Planner:
         ph = {"material_id": f["id"], "name": self.mname(f["id"]), "shape": ms, "size": size, "dist": dist,
               "fraction": {"value": round(float(f["content"]["value"]), 4), "basis": f["content"].get("basis") or "vol"},
               "orientation": {"mode": f.get("orientation") or "iso", "spread_deg": 0}}
+        if f.get("props"):
+            ph["props"] = dict(self.props(f["id"]), **f["props"])
         return ph
 
     def _payload(self, it, lang, task, matrix_id, fl, an, quality, par, doe, cal, optz, film_um):
@@ -563,7 +646,11 @@ class Planner:
                 rve["N"] = int(r["N"])
         if film_um:
             rve.update(film=True, T_um=float(film_um))
-        form = {"name": "AI · " + name_, "matrix": {"material_id": matrix_id}, "phases": phases, "rve": rve,
+        mx = {"material_id": matrix_id}
+        mp_ = (it.get("matrix") or {}).get("props") if (it.get("matrix") or {}).get("id") == matrix_id else None
+        if mp_:
+            mx["props"] = dict(self.props(matrix_id), **mp_)
+        form = {"name": "AI · " + name_, "matrix": mx, "phases": phases, "rve": rve,
                 "analyses": {k: True for k in an}, "options": {"directions": "zxy" if dirs == "xyz" else dirs}}
         out = {"kind": task, "form": form}
         if par:
@@ -571,6 +658,8 @@ class Planner:
         if doe:
             params = []
             for f in doe["factors"]:
+                if f["what"] in ("content", "size") and not (0 <= int(f.get("filler", 0) or 0) < len(phases)):
+                    continue
                 lv = None
                 if f["what"] in ("content", "size") and (f.get("range") or f.get("levels")):
                     lv = self._levels(f, doe.get("steps"), doe.get("step"))

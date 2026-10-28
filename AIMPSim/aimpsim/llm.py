@@ -1,23 +1,17 @@
-"""An optional local language model for the sentences the rules leave
-unread.
+"""The local language model: llama.cpp's server (llama-server, MIT licence)
+on 127.0.0.1 with a GGUF model file, either already running (url) or
+started by AIMPSim (server_exe + model). It runs offline. reader.py builds
+the chat and checks the answer; this module only starts the server and
+returns the answer, held to a JSON schema, or None.
 
-AIMPSim reads requests by rules first (parser.py); a local model is only
-asked when the rules leave the matrix, the fillers or the analyses open. It
-runs offline: llama.cpp's server (llama-server, MIT licence) on 127.0.0.1
-with a GGUF model file, either already running (url) or started by
-AIMPSim (server_exe + model). Its answer is held to a JSON schema, and then
-treated as a hint, never as a fact:
-
-- material and analysis names go through the same lexicon as typed words
-  (a name the library does not hold stays a question);
-- a number is kept only if it appears in the sentence (the model may move
-  a number to the right material; it may not make one up);
-- everything it filled is marked "AI guess - check it" in the summary.
-
-Configuration: aimpsim_config.json next to the aimpsim package, or the
-environment variable AIMPSIM_LLM_URL:
+The model shipped with AIMPSim is found without any setting: llama-server
+in AIMPSim/llm/bin/ and the model (one .gguf, or the first part of a split
+one) in AIMPSim/llm/models/. aimpsim_config.json next to the aimpsim
+package, or the environment variable AIMPSIM_LLM_URL, overrides it; "off"
+in the file turns the model off:
     {"llm": {"url": "http://127.0.0.1:8089", "server_exe": "C:/llama/llama-server.exe",
-             "model": "C:/models/model.gguf", "threads": 4, "timeout_s": 60}}
+             "model": "C:/models/model.gguf", "threads": 6, "timeout_s": 120}}
+    {"llm": "off"}
 """
 from __future__ import annotations
 
@@ -25,66 +19,138 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
-
-SCHEMA = {
-    "type": "object",
-    "properties": {
-        "matrix": {"type": ["string", "null"]},
-        "fillers": {"type": "array", "items": {"type": "object", "properties": {
-            "material": {"type": "string"}, "percent": {"type": ["number", "null"]},
-            "basis": {"type": ["string", "null"], "enum": ["vol", "wt", None]},
-            "shape": {"type": ["string", "null"]}, "size_um": {"type": ["number", "null"]}},
-            "required": ["material"]}},
-        "properties": {"type": "array", "items": {"type": "string"}},
-        "task": {"type": ["string", "null"], "enum": ["run", "doe", "calibration", "optimization", None]},
-    },
-    "required": ["matrix", "fillers", "properties"],
-}
-PROMPT = ("Extract the composite-material simulation request as JSON. matrix: the resin or matrix material as "
-          "written. fillers: each filler material as written, its content in percent if stated (0.55 means 55), "
-          "basis vol or wt if stated, shape and size in micrometres if stated. properties: the properties to compute "
-          "as written. Use null for anything not stated. Never invent a number.\nRequest: ")
 
 
 def config_path():
     return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "aimpsim_config.json")
 
 
+def bundled():
+    """llama-server and the model shipped in AIMPSim/llm/, or {}."""
+    base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "llm")
+    exe = os.path.join(base, "bin", "llama-server.exe" if os.name == "nt" else "llama-server")
+    mdir = os.path.join(base, "models")
+    if not os.path.isfile(exe) or not os.path.isdir(mdir):
+        return {}
+    # every model there, a split one only with all its parts; the largest is used (the 4B over the 2B)
+    files = [f for f in os.listdir(mdir) if f.endswith(".gguf") and not f.startswith("mmproj")]
+    models = []
+    for f in files:
+        m = re.match(r"(.*)-00001-of-(\d{5})\.gguf$", f)
+        if m:
+            parts = [f"{m.group(1)}-{i:05d}-of-{m.group(2)}.gguf" for i in range(1, int(m.group(2)) + 1)]
+            if all(p in files for p in parts):
+                models.append((sum(os.path.getsize(os.path.join(mdir, p)) for p in parts), f))
+        elif "-of-" not in f:
+            models.append((os.path.getsize(os.path.join(mdir, f)), f))
+    if not models:
+        return {}
+    cores = os.cpu_count() or 4
+    return {"server_exe": exe, "model": os.path.join(mdir, max(models)[1]), "threads": max(2, min(4, cores // 2))}
+
+
 def load_config():
-    cfg = {}
+    cfg = None
     try:
         with open(config_path(), encoding="utf-8") as fh:
-            cfg = json.load(fh).get("llm") or {}
+            cfg = json.load(fh).get("llm")
     except (OSError, ValueError):
-        cfg = {}
+        cfg = None
+    if cfg == "off":
+        return {}
+    cfg = dict(cfg) if isinstance(cfg, dict) else bundled()
     if os.environ.get("AIMPSIM_LLM_URL"):
         cfg["url"] = os.environ["AIMPSIM_LLM_URL"]
     return cfg
+
+
+def _free_port():
+    import socket
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        return so.getsockname()[1]
+
+
+def _tie_to_parent(proc):
+    """Windows: put the server in a job that ends with this process, so that
+    it never outlives MPSim (closed, crashed or killed). Returns the job
+    handle, which must stay open; None elsewhere or when it fails."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class Basic(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class Io(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_uint64) for n in ("r", "w", "o", "rb", "wb", "ob")]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [("Basic", Basic), ("Io", Io), ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                        ("PeakJobMemoryUsed", ctypes.c_size_t)]
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = Extended()
+        info.Basic.LimitFlags = 0x2000                  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            return None
+        if not k32.AssignProcessToJobObject(job, wintypes.HANDLE(int(proc._handle))):
+            return None
+        return job
+    except (OSError, AttributeError, ValueError):
+        return None
 
 
 class LocalLLM:
     def __init__(self, cfg=None):
         self.cfg = cfg if cfg is not None else load_config()
         self.proc = None
-        port = int(self.cfg.get("port") or 8089)
-        self.url = (self.cfg.get("url") or (f"http://127.0.0.1:{port}" if self.cfg.get("server_exe") else "")).rstrip("/")
+        self.job = None
+        self.last = {}
+        self.lock = threading.Lock()
+        self.state = "off"
+        self.used = time.time()
+        self.idle_s = 60.0 * float(self.cfg.get("idle_minutes", 15) or 0)
+        # a server already running (url), or one AIMPSim starts on a free port of its own
+        port = self.cfg.get("port")
+        self.url = (self.cfg.get("url") or (f"http://127.0.0.1:{int(port)}" if port and self.cfg.get("server_exe")
+                                            else "")).rstrip("/")
 
     @property
     def configured(self):
-        return bool(self.url)
+        return bool(self.url or (self.cfg.get("server_exe") and self.cfg.get("model")))
 
     def status(self):
         if not self.configured:
-            return {"enabled": False, "reason": "no local model configured (aimpsim_config.json); the rules alone read requests"}
+            return {"enabled": False, "reason": "no local model (AIMPSim/llm/ or aimpsim_config.json); the rules alone read requests"}
         ok = self._ping()
         if not ok and self.cfg.get("server_exe") and self.cfg.get("model"):
-            return {"enabled": True, "running": False, "url": self.url, "reason": "starts on first use"}
-        return {"enabled": True, "running": ok, "url": self.url}
+            return {"enabled": True, "running": False, "state": self.state, "url": self.url,
+                    "model": os.path.basename(self.cfg.get("model") or "") or None, "reason": "starts on first use"}
+        return {"enabled": True, "running": ok, "state": self.state if self.state != "off" or not ok else "ready",
+                "url": self.url,
+                "model": os.path.basename(self.cfg.get("model") or "") or None}
 
     def _ping(self):
+        if not self.url:
+            return False
         try:
             with urllib.request.urlopen(self.url + "/health", timeout=2) as r:
                 return r.status == 200
@@ -92,40 +158,104 @@ class LocalLLM:
             return False
 
     def _start(self):
+        with self.lock:
+            if self._ping():
+                return True
+            ok = self._start_locked()
+            self.state = "ready" if ok else "failed"
+            return ok
+
+    def _start_locked(self):
         """llama-server on 127.0.0.1 only, with a few threads, so that it does
         not take the cores the solvers use."""
         exe, model = self.cfg.get("server_exe"), self.cfg.get("model")
         if not exe or not model or not os.path.exists(exe) or not os.path.exists(model):
             return False
+        if not self.cfg.get("port"):
+            self.url = f"http://127.0.0.1:{_free_port()}"
         port = self.url.rsplit(":", 1)[-1]
         args = [exe, "-m", model, "--host", "127.0.0.1", "--port", port, "-t", str(int(self.cfg.get("threads") or 4)),
-                "-c", "2048"]
+                "-c", str(int(self.cfg.get("ctx") or 8192)), "-np", "1", "--no-webui"]
+        args += [str(a) for a in self.cfg.get("args") or []]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
+        log = self.cfg.get("log")
+        out = open(log, "ab") if log else subprocess.DEVNULL
+        self.proc = subprocess.Popen(args, stdout=out, stderr=out, creationflags=flags)
+        self.job = _tie_to_parent(self.proc)
+        self.used = time.time()
+        if self.idle_s > 0:
+            threading.Thread(target=self._watch_idle, args=(self.proc,), daemon=True).start()
         t0 = time.time()
-        while time.time() - t0 < float(self.cfg.get("start_timeout_s") or 90):
+        while time.time() - t0 < float(self.cfg.get("start_timeout_s") or 180):
             if self._ping():
                 return True
-            time.sleep(1.0)
+            if self.proc.poll() is not None:
+                return False
+            time.sleep(0.5)
         return False
 
-    def ask(self, text):
-        """The model's JSON for a request, or None."""
+    def _watch_idle(self, proc):
+        """End the server when it has not been asked for idle_minutes (its
+        memory goes back to the solvers); the next request starts it again."""
+        while self.proc is proc and proc.poll() is None:
+            time.sleep(min(30.0, self.idle_s))
+            if self.proc is proc and time.time() - self.used > self.idle_s:
+                with self.lock:
+                    if self.proc is proc:
+                        self.close()
+                        self.state = "off"
+                return
+
+    def chat_json(self, msgs, schema, max_tokens=600):
+        """The model's answer to a chat, held to a JSON schema; None when
+        there is no model or no usable answer."""
         if not self.configured:
             return None
+        self.used = time.time()
         if not self._ping() and not self._start():
             return None
-        body = {"messages": [{"role": "user", "content": PROMPT + text}], "temperature": 0, "max_tokens": 400,
-                "response_format": {"type": "json_object", "schema": SCHEMA}}
+        self.used = time.time()
+        body = {"messages": msgs, "temperature": 0, "max_tokens": max_tokens, "cache_prompt": True,
+                "response_format": {"type": "json_object", "schema": schema},
+                "chat_template_kwargs": {"enable_thinking": False}}
         req = urllib.request.Request(self.url + "/v1/chat/completions", data=json.dumps(body).encode("utf-8"),
                                      headers={"Content-Type": "application/json"})
+        t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=float(self.cfg.get("timeout_s") or 60)) as r:
+            with urllib.request.urlopen(req, timeout=float(self.cfg.get("timeout_s") or 120)) as r:
                 out = json.loads(r.read().decode("utf-8"))
+            self.last = {"seconds": round(time.time() - t0, 2), "usage": out.get("usage"),
+                         "timings": out.get("timings")}
             content = out["choices"][0]["message"]["content"]
             return json.loads(content)
-        except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError):
+        except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError, TypeError):
+            self.last = {"seconds": round(time.time() - t0, 2), "error": True}
             return None
+
+    def warm(self, msgs):
+        """Start the server and read the fixed part of the chat (instructions
+        and examples) once, so that the first request is answered as fast as
+        the next ones. Runs in the background; self.state tells how far."""
+        if not self.configured or self.state in ("starting", "ready"):
+            return
+
+        def go():
+            self.state = "starting"
+            if not (self._ping() or self._start()):
+                self.state = "failed"
+                return
+            self.state = "starting"          # up, but still reading its instructions
+            body = {"messages": msgs, "temperature": 0, "max_tokens": 1, "cache_prompt": True,
+                    "chat_template_kwargs": {"enable_thinking": False}}
+            req = urllib.request.Request(self.url + "/v1/chat/completions", data=json.dumps(body).encode("utf-8"),
+                                         headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=600) as r:
+                    r.read()
+                self.state = "ready"
+            except (urllib.error.URLError, OSError, ValueError):
+                self.state = "failed"
+        threading.Thread(target=go, daemon=True).start()
 
     def close(self):
         if self.proc is not None:
@@ -134,88 +264,3 @@ class LocalLLM:
             except OSError:
                 pass
             self.proc = None
-
-
-def apply_hints(intent, hints, lex):
-    """Fill what the rules left open from the model's answer, under the
-    rules in the module docstring. Returns the names of what was filled."""
-    if not isinstance(hints, dict) or not hints:
-        return []
-    # an answer of the wrong shape is read only where it has the right one
-    hints = {"matrix": hints.get("matrix") if isinstance(hints.get("matrix"), str) else None,
-             "fillers": [h for h in (hints.get("fillers") if isinstance(hints.get("fillers"), list) else [])
-                         if isinstance(h, dict) and isinstance(h.get("material"), str)],
-             "properties": [p for p in (hints.get("properties") if isinstance(hints.get("properties"), list) else [])
-                            if isinstance(p, str)],
-             "task": hints.get("task") if isinstance(hints.get("task"), str) else None}
-    for h in hints["fillers"]:
-        for k in ("percent", "size_um"):
-            if not isinstance(h.get(k), (int, float)) or isinstance(h.get(k), bool):
-                h[k] = None
-    text = intent.get("norm") or ""
-    numbers = {float(x) for x in re.findall(r"\d+(?:\.\d+)?", text)}
-    filled = []
-
-    def resolve(word):
-        word = (word or "").strip()
-        if not word:
-            return None, None
-        ms = [m for m in lex.scan(word) if m["kind"] == "material" and not isinstance(m["key"], tuple)]
-        if ms:
-            return ms[0]["key"], ms[0]
-        best = lex.fuzzy_material(word)
-        if best and best[0][1] >= 0.8:
-            return best[0][0], None
-        return None, None
-
-    def said(v):
-        return v is not None and (v in numbers or round(v / 100.0, 6) in numbers or round(v * 100.0, 6) in numbers)
-
-    if (intent.get("matrix") is None or not intent["matrix"].get("id")) and hints.get("matrix"):
-        mid, _ = resolve(hints["matrix"])
-        if mid:
-            intent["matrix"] = {"id": mid, "choices": [], "spans": [], "text": hints["matrix"], "how": "llm", "score": 0.0,
-                                "kind": "material", "alts": [], "role": "matrix", "content": None}
-            filled.append("matrix")
-    named = [f for f in intent.get("fillers") or [] if f.get("id")]
-    unnamed = [f for f in intent.get("fillers") or [] if not f.get("id")]
-    have = {f.get("id") for f in named}
-    for h in hints.get("fillers") or []:
-        mid, _ = resolve(h.get("material"))
-        if not mid or mid in have or (intent.get("matrix") or {}).get("id") == mid:
-            continue
-        pct = h.get("percent")
-        if pct is not None and pct <= 1.0:
-            pct = 100.0 * pct
-        content = None
-        if pct is not None and said(pct):
-            content = {"value": float(pct), "basis": h.get("basis") if h.get("basis") in ("vol", "wt") else None,
-                       "how": "llm", "raw": str(h.get("percent"))}
-        size = h.get("size_um") if h.get("size_um") is not None and said(h["size_um"]) else None
-        shape = None
-        if h.get("shape"):
-            sm = [m for m in lex.scan(h["shape"]) if m["kind"] == "shape"]
-            shape = sm[0]["key"] if sm else None
-        if unnamed:                    # the model names a filler the rules saw but could not name
-            gone = unnamed.pop(0)
-            intent["fillers"] = [f for f in intent["fillers"] if f is not gone]
-            if content is None and gone.get("content") is not None:
-                content = gone["content"]
-        intent["fillers"].append({"id": mid, "choices": [], "spans": [], "text": h.get("material"), "how": "llm",
-                                  "score": 0.0, "kind": "material", "alts": [], "role": "filler", "content": content,
-                                  "size_um": size, "shape": shape, "size_src": "llm" if size else None,
-                                  "shape_src": "llm" if shape else None, "aspect": None, "length_um": None,
-                                  "thickness_um": None, "std_um": None, "cv": None})
-        have.add(mid)
-        filled.append("filler")
-    if not intent.get("analyses"):
-        for p in hints.get("properties") or []:
-            best = lex.fuzzy_term(p, "analysis")
-            ms = [m for m in lex.scan(p) if m["kind"] == "analysis"]
-            key = ms[0]["key"] if ms else (best[0][0] if best and best[0][1] >= 0.8 else None)
-            if key and key not in intent["analyses"]:
-                intent["analyses"].append(key)
-                filled.append("analysis")
-    if not intent.get("task") and hints.get("task") in ("doe", "calibration", "optimization"):
-        intent["task"] = hints["task"]
-    return filled

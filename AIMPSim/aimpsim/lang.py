@@ -29,6 +29,8 @@ SRC = {"text": ("입력", "said"), "fuzzy": ("오타·발음 보정", "spelling 
 
 M = {
     "q_matrix": ("매트릭스(수지) 재료가 무엇인가요?", "Which matrix (resin) material?"),
+    "q_compare": ("{names}을(를) 비교하는 요청으로 읽었습니다. 섞지 않고 각각 따로 해석할까요?",
+                  "This reads as a comparison of {names}. Run each on its own (they are not mixed)?"),
     "q_filler": ("어떤 필러를 넣나요?", "Which filler?"),
     "q_content": ("{name}의 함량은 얼마인가요? (예: 55%, 0.55, 30 wt%)", "How much {name}? (e.g. 55%, 0.55, 30 wt%)"),
     "q_basis": ("함량은 부피% 인가요, 중량% 인가요?", "Is the content by volume or by weight?"),

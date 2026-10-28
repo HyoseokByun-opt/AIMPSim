@@ -35,11 +35,18 @@
   }
 
   // ------------------------------------------------------------ left panel
+  function llmLabel(st) {
+    const ms = st && st.llm && st.llm.state;
+    return (!st ? "" : st.llm && st.llm.enabled
+      ? `${L("로컬 모델", "Local model")}${st.llm.model ? ` (${st.llm.model.replace(/\.gguf$/, "")})` : ""}: ${
+        ms === "ready" ? L("준비됨", "ready") : ms === "starting" ? L("준비 중… (처음 한 번 1분 이내)", "getting ready… (under a minute, once)")
+          : ms === "failed" ? L("시작하지 못함 - 규칙으로 읽습니다", "did not start - the rules read requests")
+            : L("필요할 때 시작", "starts when needed")}`
+      : L("로컬 모델 없음 - 규칙으로 읽습니다", "No local model - requests are read by rules"))
+      + (st ? ` · v${st.version}` : "");
+  }
   function left() {
     const st = S.status;
-    const llm = !st ? "" : st.llm && st.llm.enabled
-      ? `${L("로컬 모델", "Local model")}: ${st.llm.running ? L("실행 중", "running") : L("필요할 때 시작", "starts when needed")}`
-      : L("로컬 모델 없음 - 규칙으로 읽습니다", "No local model - requests are read by rules");
     return `<div class="sec"><div class="sh">${icon("ai")}${L("요청", "Request")}</div><div class="sb">
         <textarea id="aiText" class="ai-text" rows="6" placeholder="${esc(L("예: 에폭시에 구형 알루미나 55 vol%, 열전도도 구해줘", "e.g. epoxy with 55 vol% spherical alumina, thermal conductivity"))}"></textarea>
         <div class="row gap" style="margin-top:6px"><button class="btn primary" id="aiSend">${icon("play")}${L("보내기", "Send")}</button>
@@ -50,10 +57,11 @@
         <div>${L("<b>함량</b>: 55%, 55 vol%, 30 wt%, 30 phr, 0.55(=55%), 1/3, 절반. 단위 없는 1 이하의 수는 분율, 1~100은 %로 읽고 요약에 표시합니다.", "<b>Content</b>: 55%, 55 vol%, 30 wt%, 30 phr, 0.55 (= 55 %), 1/3, half. A bare number up to 1 is a fraction, up to 100 a percent - the summary says which.")}</div>
         <div>${L("<b>범위</b>: 40~60%, 40-60%, 40에서 60%까지, 40, 50, 60% → DOE. 5단계, 10%씩.", "<b>Ranges</b>: 40-60%, from 40 to 60%, 40, 50, 60% → a DOE; 5 levels, in steps of 10%.")}</div>
         <div>${L("<b>오타</b>: 철자와 발음이 가까운 재료로 찾고(애폭시→에폭시), 요약에 보정 내용을 보여 줍니다. 애매하면 묻습니다.", "<b>Typos</b>: the closest material by spelling and sound (alumna → alumina), shown in the summary; when unsure, a question.")}</div>
-        <div>${L("<b>물성값</b>은 MPSim 라이브러리 값만 씁니다. 라이브러리에 없는 재료는 지어내지 않고 묻습니다.", "<b>Material values</b> are the MPSim library's; a material it does not hold is asked about, never made up.")}</div>
+        <div>${L("<b>자유롭게</b> 쓰세요: 돌려 말하기, 정정(\"55%, 아니 60%\"), 빼기(\"알루미나 말고\"), 띄어쓰기·오타, 한영 혼용을 로컬 모델이 읽고, 규칙이 재료와 숫자가 문장에 있는지 검산합니다.", "<b>Write freely</b>: roundabout wording, corrections (\"55%, no, 60%\"), \"not alumina\", spacing and typing errors, Korean and English mixed are read by the local model; the rules check that every material and number is in the sentence.")}</div>
+        <div>${L("<b>물성값</b>은 MPSim 라이브러리 값이나, 문장에서 직접 준 값(\"k가 200인 알루미나\")만 씁니다. 지어내지 않고, 라이브러리에 없는 재료는 묻습니다.", "<b>Material values</b> are the MPSim library's, or a value given in the request (\"alumina with k = 200\"); never made up - a material the library does not hold is asked about.")}</div>
         <div>${L("말하지 않은 정확도·병렬·형상·크기는 추천값과 함께 묻고, '알아서'라고 하면 문제에 맞게 정합니다.", "Accuracy, parallel runs, shape and size not given are asked with a recommendation; \"decide for me\" sets them for the problem.")}</div>
       </div></div>
-      <div class="sec"><div class="sh">${icon("solver")}AIMPSim</div><div class="sb"><div class="hint">${esc(llm)}${st ? ` · v${esc(st.version)}` : ""}</div></div></div>`;
+      <div class="sec"><div class="sh">${icon("solver")}AIMPSim</div><div class="sb"><div class="hint" id="aiLlm">${esc(llmLabel(st))}</div></div></div>`;
   }
   function mountLeft(body) {
     const ta = body.querySelector("#aiText");
@@ -61,34 +69,73 @@
     body.querySelector("#aiSend").onclick = () => send(ta.value);
     body.querySelector("#aiNew").onclick = () => action("new");
     ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(ta.value); } });
-    if (!S.status) fetch("/api/ai/status").then((r) => r.json()).then((j) => { S.status = j; if (H().state.tab === "ai") H().renderLeft(); }).catch(() => { });
+    if (!S.status || (S.status.llm && S.status.llm.enabled && S.status.llm.state !== "ready")) warmUp();
     setTimeout(() => ta.focus(), 0);
   }
 
+  // the local model is started and has read its instructions before the first request
+  let warming = false;
+  async function warmUp() {
+    if (warming) return;
+    warming = true;
+    try {
+      let st = await (await fetch("/api/ai/status")).json();
+      S.status = st;
+      if (st.llm && st.llm.enabled && st.llm.state !== "ready") {
+        await fetch("/api/ai/warm", { method: "POST" });
+        for (let i = 0; i < 120; i++) {
+          st = await (await fetch("/api/ai/status")).json();
+          S.status = st;
+          showLlm();                     // only the label: the request being typed stays
+          if (!st.llm || ["ready", "failed"].includes(st.llm.state)) break;
+          await new Promise((r) => setTimeout(r, 2500));
+        }
+      }
+      showLlm();
+    } catch (e) { } finally { warming = false; }
+  }
+  function showLlm() {
+    const el = document.getElementById("aiLlm");
+    if (el) el.textContent = llmLabel(S.status);
+  }
+
   // ------------------------------------------------------------ conversation
+  // the conversation is on the centre page: it is shown whenever a request goes out or a reply comes back
+  // (opening a case may have put the 3D view there in the meantime)
+  function showConversation() {
+    const h = H();
+    if (h.state.tab === "ai" && h.state.center !== "ai") h.setCenter("ai");
+  }
+  // the left panel drawn again (its words follow the request's language), keeping what is being typed
+  function redrawLeft() {
+    const ta = document.getElementById("aiText"), typed = ta ? ta.value : "";
+    H().renderLeft();
+    const nt = document.getElementById("aiText");
+    if (nt && typed) nt.value = typed;
+  }
   async function send(text) {
     text = String(text || "").trim();
     if (!text || S.busy) return;
     if (/[가-힣]/.test(text)) S.lang = "ko"; else if (!S.msgs.length) S.lang = "en";
     S.msgs.push({ role: "user", text });
-    S.busy = true; render();
     const ta = document.getElementById("aiText"); if (ta) ta.value = "";
+    S.busy = true; showConversation(); render();
     try {
       const r = await post("/api/ai/interpret", { text, session_id: S.sid });
       S.sid = r.session_id; S.lang = r.lang || S.lang;
       S.msgs.push({ role: "ai", reply: r });
     } catch (e) { S.msgs.push({ role: "ai", error: e.message }); }
-    S.busy = false; save(); render(); H().renderLeft();
+    S.busy = false; save(); showConversation(); render(); redrawLeft();
   }
   async function answer(ans, auto) {
     if (!S.sid || S.busy) return;
-    S.busy = true; render();
+    S.busy = true; showConversation(); render();
     try {
       const r = await post("/api/ai/answer", { session_id: S.sid, answers: ans || {}, auto: !!auto });
       const last = S.msgs[S.msgs.length - 1];
       if (last && last.role === "ai" && !last.done) last.reply = r; else S.msgs.push({ role: "ai", reply: r });
     } catch (e) { S.msgs.push({ role: "ai", error: e.message }); }
-    S.busy = false; save(); render();
+    S.busy = false; save(); showConversation(); render();
   }
 
   function render() {
@@ -150,8 +197,11 @@
         ${opt && !r.auto ? `<button class="btn" data-aiauto>${icon("auto")}${L("알아서 (추천값으로)", "Decide for me (recommended)")}</button>` : ""}
         ${r.payload ? `<button class="btn" data-aiedit>${icon("structure")}${L("탭에서 열어 고치기", "Open in the tabs to edit")}</button>` : ""}</div>`;
     const doneTxt = done ? `<div class="hint ai-done">${esc(done)}</div>` : "";
+    const how = live && r.llm_used && r.llm_used.length
+      ? `<div class="hint ai-how">${L("로컬 모델이 읽고 규칙이 검산했습니다", "Read by the local model, checked by the rules")}${r.llm_seconds != null ? ` · ${Number(r.llm_seconds).toFixed(1)} s` : ""}</div>`
+      : live ? `<div class="hint ai-how">${L("규칙으로 읽었습니다", "Read by the rules")}</div>` : "";
     return `<div class="ai-card"><div class="ai-head">${esc(head)}</div>
-      <table class="ai-sum">${rows}</table>${probs}${unres}${qs ? `<div class="ai-qs">${qs}</div>` : ""}${btns}${doneTxt}</div>`;
+      <table class="ai-sum">${rows}</table>${probs}${unres}${qs ? `<div class="ai-qs">${qs}</div>` : ""}${btns}${doneTxt}${how}</div>`;
   }
   function question(q) {
     const opts = (q.options || []).map((o) => `<button class="ai-opt${o.recommended ? " rec" : ""}" data-aiq="${esc(q.id)}" data-aiopt="${esc(o.value)}"${q.multi ? " data-multi=1" : ""}>${esc(o.label)}</button>`).join("");
@@ -183,6 +233,8 @@
       }
       if (p.kind === "run" || p.kind === "structure") {
         await h.run(p.kind === "structure");
+        // a comparison: the other alternatives queued after it, each on its own
+        for (const f of p.more_forms || []) { h.applyForm(f); await h.run(false); }
         m.done = L("해석을 시작했습니다. 진행은 Runs와 Console에서, 결과는 Result Viewer에서 볼 수 있습니다.", "The run has started: follow it in Runs and the Console; the result opens in the Result Viewer.");
         S.msgs.push({ role: "ai", note: `${esc(m.done)} <button class="btn sm" data-aigo=",res">${L("Result Viewer", "Result Viewer")}</button>` });
       } else if (p.kind === "doe" || p.kind === "optimization") {

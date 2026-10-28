@@ -30,6 +30,7 @@
 .ai-free input{font:inherit;font-size:12px;padding:3px 8px;border:1px solid #cfd6e0;border-radius:6px;width:220px}
 .ai-actions{margin-top:12px}
 .ai-done{margin-top:8px}
+.ai-how{margin-top:6px;font-size:11px;opacity:.75}
 .ai-empty{padding:30px 6px}
 .ai-empty-t{display:flex;align-items:center;gap:8px;font-size:17px;font-weight:600;margin-bottom:6px}
 .ai-empty-t svg{width:22px;height:22px}
