@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIMPSim — MPSim with requests in words · a local language model for simulation inputs</title>
+<meta name="description" content="AIMPSim is MPSim with an AI tab: a request typed the way people say it is read by a local language model, checked against the sentence by rules, and run as an MPSim case. Offline, open source.">
+<meta name="keywords" content="AIMPSim, MPSim, natural language, local language model, llama.cpp, Qwen, simulation input, RVE, homogenization, semiconductor packaging, thermal conductivity">
+<meta name="author" content="Hyoseok Byun">
+<link rel="canonical" href="https://hyoseokbyun-opt.github.io/AIMPSim/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="AIMPSim">
+<meta property="og:title" content="AIMPSim — MPSim with requests in words">
+<meta property="og:description" content="Type the case the way you would say it: a local model reads it, rules check it, MPSim runs it. Offline, MIT License.">
+<meta property="og:url" content="https://hyoseokbyun-opt.github.io/AIMPSim/">
+<meta property="og:image" content="https://hyoseokbyun-opt.github.io/AIMPSim/assets/social_preview.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "AIMPSim",
+  "description": "MPSim with an AI tab: simulation requests in words, read by a local language model and checked against the sentence.",
+  "applicationCategory": "ScientificApplication",
+  "operatingSystem": "Windows 10, Windows 11",
+  "softwareVersion": "0.2.0",
+  "license": "https://opensource.org/licenses/MIT",
+  "url": "https://hyoseokbyun-opt.github.io/AIMPSim/",
+  "downloadUrl": "https://github.com/HyoseokByun-opt/AIMPSim/releases/latest",
+  "codeRepository": "https://github.com/HyoseokByun-opt/AIMPSim",
+  "isBasedOn": "https://github.com/HyoseokByun-opt/MPSim",
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+  "author": {"@type": "Person", "name": "Hyoseok Byun", "sameAs": ["https://github.com/HyoseokByun-opt"]}
+}
+</script>
+<style>
+  :root {
+    --bg: #ffffff; --bg2: #f6f8fa; --card: #ffffff; --ink: #1f2328; --ink2: #57606a; --line: #d0d7de;
+    --accent: #0b62c4; --accent2: #0a53a8; --chip: #ddf4ff; --chipink: #0a3069; --code: #f6f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --bg2: #161b22; --card: #0d1117; --ink: #e6edf3; --ink2: #9198a1; --line: #30363d;
+            --accent: #4493f8; --accent2: #6aa8fa; --chip: #12263f; --chipink: #9ecbff; --code: #161b22; }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--ink); line-height: 1.6;
+         font: 16px/1.6 "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
+  header.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent);
+               backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  header.top .wrap { display: flex; align-items: center; gap: 18px; height: 60px; }
+  header.top img { height: 34px; display: block; }
+  nav { margin-left: auto; display: flex; gap: 18px; flex-wrap: wrap; font-size: 15px; }
+  nav a { color: var(--ink2); }
+  nav a.gh { color: var(--ink); font-weight: 600; }
+  .hero { padding: 56px 0 28px; text-align: center; }
+  .hero h1 { font-size: clamp(30px, 5vw, 48px); line-height: 1.15; margin: 0 0 14px; letter-spacing: -0.5px; }
+  .hero h1 span { color: var(--accent); }
+  .hero p.lead { font-size: clamp(17px, 2.2vw, 20px); color: var(--ink2); max-width: 760px; margin: 0 auto 26px; }
+  .btns { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn { display: inline-block; padding: 11px 20px; border-radius: 8px; font-weight: 600; border: 1px solid var(--line);
+         color: var(--ink); background: var(--bg2); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn:hover { text-decoration: none; filter: brightness(1.05); }
+  .meta { margin-top: 18px; color: var(--ink2); font-size: 14px; }
+  .meta b { color: var(--ink); font-weight: 600; }
+  figure { margin: 0; }
+  .banner { margin: 18px auto 0; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: #fff; }
+  .banner img, .shot img { width: 100%; height: auto; display: block; }
+  section { padding: 56px 0 8px; }
+  section h2 { font-size: 28px; margin: 0 0 8px; letter-spacing: -0.3px; }
+  section p.sub { color: var(--ink2); margin: 0 0 24px; max-width: 820px; }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .step, .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .step .n { display: inline-block; width: 28px; height: 28px; border-radius: 50%; background: var(--chip); color: var(--chipink);
+             font-weight: 700; text-align: center; line-height: 28px; margin-bottom: 8px; }
+  .step h3, .card h3 { margin: 0 0 6px; font-size: 18px; }
+  .step p, .card p { margin: 0; color: var(--ink2); font-size: 15px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card ul { margin: 8px 0 0; padding-left: 18px; color: var(--ink2); font-size: 15px; }
+  .card .tag { display: inline-block; font-size: 12px; font-weight: 600; color: var(--chipink); background: var(--chip);
+               border-radius: 999px; padding: 2px 10px; margin-bottom: 8px; }
+  .shot { border-radius: 12px; overflow: hidden; border: 1px solid var(--line); }
+  .flow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.43fr); gap: 18px; align-items: start; }
+  .flow .plots { background: #fff; margin: 0; }
+  .flow .anim { margin: 0; text-align: center; }
+  .flow .anim img { width: 100%; height: auto; display: block; border-radius: 12px; }
+  .flow .anim figcaption { color: var(--ink2); font-size: 13.5px; margin-top: 8px; }
+  @media (max-width: 860px) { .flow { grid-template-columns: 1fr; } }
+  .ex { margin-top: 38px; }
+  .ex h3 { font-size: 20px; margin: 0 0 6px; }
+  .ex > p { color: var(--ink2); max-width: 900px; margin: 0 0 14px; }
+  .ex .shot { margin: 14px 0 0; }
+  .ex .flow + .shot, .ex .flow + table { margin-top: 14px; }
+  table.kv { border-collapse: collapse; font-size: 14px; margin-top: 12px; min-width: 50%; }
+  table.kv th, table.kv td { text-align: left; padding: 6px 12px 6px 0; border-bottom: 1px solid var(--line); }
+  table.kv th { color: var(--ink2); font-weight: 600; }
+  .ex .note { color: var(--ink2); font-size: 13px; }
+  .sheet.wide { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 8px; }
+  @media (max-width: 1000px) { .sheet.wide { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .sheet { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .sheet .tile { background: var(--card); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 10px;
+                 padding: 10px 14px 12px; }
+  .sheet .lab { display: block; color: var(--c); font-weight: 600; font-size: 12.5px; letter-spacing: .04em; text-transform: uppercase; }
+  .sheet .lab i { font-style: normal; text-transform: none; letter-spacing: 0; font-weight: 500; }
+  .sheet b { display: block; font-size: 25px; line-height: 1.25; margin: 4px 0 6px; }
+  .sheet .l { display: block; color: var(--ink2); font-size: 13.5px; line-height: 1.5; }
+  @media (prefers-color-scheme: dark) { .sheet .lab { color: color-mix(in srgb, var(--c) 62%, #fff); } }
+  @media (max-width: 520px) { .sheet, .sheet.wide { grid-template-columns: 1fr; } table.kv { min-width: 0; font-size: 13px; } }
+  table.bench { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.bench th, table.bench td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.bench th { color: var(--ink2); font-weight: 600; }
+  table.bench .src { display: block; color: var(--ink2); font-size: 12.5px; margin-top: 2px; }
+  ol.refs { color: var(--ink2); font-size: 13px; line-height: 1.55; padding-left: 22px; margin: 14px 0 0; }
+  ol.refs li { margin: 3px 0; overflow-wrap: anywhere; }
+  @media (max-width: 700px) { table.bench { font-size: 12.5px; } }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 8px; }
+  .stat { border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; background: var(--bg2); }
+  .stat b { display: block; font-size: 26px; color: var(--accent); line-height: 1.2; }
+  .stat span { color: var(--ink2); font-size: 14px; }
+  .presets { columns: 2; column-gap: 32px; padding-left: 18px; color: var(--ink2); }
+  .presets li { break-inside: avoid; margin-bottom: 4px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .two > *, .grid > *, .steps > *, .stats > * { min-width: 0; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; overflow-x: auto;
+        font: 13.5px/1.5 Consolas, "SFMono-Regular", Menlo, monospace; margin: 10px 0 0; }
+  code { font-family: Consolas, "SFMono-Regular", Menlo, monospace; font-size: 0.92em; background: var(--code);
+         border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+  pre code { border: 0; padding: 0; background: none; }
+  .note { color: var(--ink2); font-size: 14px; }
+  footer { margin-top: 64px; border-top: 1px solid var(--line); padding: 26px 0 40px; color: var(--ink2); font-size: 14px; }
+  footer .wrap { display: flex; gap: 18px; flex-wrap: wrap; justify-content: space-between; }
+  @media (max-width: 860px) {
+    .steps, .grid, .two { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .presets { columns: 1; }
+    nav { display: none; }
+  }
+
+  :root { --ai: #8250df; --aichip: #fbefff; --aiink: #6e40c9; }
+  @media (prefers-color-scheme: dark) { :root { --ai: #a371f7; --aichip: #271052; --aiink: #d2a8ff; } }
+  .hero h1 span { color: var(--ai); }
+  .steps.four { grid-template-columns: repeat(4, 1fr); }
+  @media (max-width: 1000px) { .steps.four { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 600px) { .steps.four { grid-template-columns: 1fr; } }
+  .card .tag.ai { color: var(--aiink); background: var(--aichip); }
+  .stat b { color: var(--ai); }
+  .shotframe { box-shadow: 0 8px 28px rgba(31, 35, 40, .12); }
+  table.ex-table td:first-child { font-size: 15px; }
+  table.ex-table td:last-child { color: var(--ink2); }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a href="#top" aria-label="AIMPSim home">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/aimpsim_logo_dark.png">
+        <img src="assets/aimpsim_logo_light.png" alt="AIMPSim — MPSim with requests in words" width="140" height="34">
+      </picture>
+    </a>
+    <nav aria-label="Sections">
+      <a href="#how">How it reads</a>
+      <a href="#freely">Write freely</a>
+      <a href="#checks">Checks</a>
+      <a href="#model">The model</a>
+      <a href="#verification">Verification</a>
+      <a href="#download">Download</a>
+      <a href="https://hyoseokbyun-opt.github.io/MPSim/">MPSim ↗</a>
+      <a class="gh" href="https://github.com/HyoseokByun-opt/AIMPSim">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <div class="wrap hero">
+    <h1>AIMPSim <span>· MPSim with requests in words</span></h1>
+    <p class="lead">Type the case the way you would say it - roundabout, corrected halfway, misspelt, Korean and English
+      mixed. A small language model reads it on your PC, rules check every material and number against the sentence,
+      and the summary shows what MPSim will run before anything runs.</p>
+    <div class="btns">
+      <a class="btn primary" href="https://github.com/HyoseokByun-opt/AIMPSim/releases/latest">Download</a>
+      <a class="btn" href="https://github.com/HyoseokByun-opt/AIMPSim/blob/main/AIMPSim/docs/GUIDE_KO.md">Guide (Korean)</a>
+      <a class="btn" href="https://github.com/HyoseokByun-opt/AIMPSim">Source code</a>
+    </div>
+    <div class="meta"><b>Version 0.2.0</b> · MIT License · Windows 10 / 11 · works offline ·
+      MPSim 5.6.3 inside</div>
+    <figure class="banner shotframe">
+      <img src="assets/ai_tab.png" width="1500" height="950" fetchpriority="high"
+           alt="The AI tab of MPSim: a casual request with a correction, read into a summary of what will run, with the questions and their recommended answers">
+    </figure>
+  </div>
+
+  <section id="how">
+    <div class="wrap">
+      <h2>How a request is read</h2>
+      <p class="sub">AIMPSim is MPSim with an AI tab between Home and Material. The analyses, solvers, checks and guides are
+        MPSim's; AIMPSim turns a sentence into an MPSim case - a run, a DOE study, a calibration or an optimisation.</p>
+      <div class="steps four">
+        <div class="step"><span class="n">1</span><h3>The model reads</h3>
+          <p>A local language model reads the whole request - a follow-up together with the request so far - into a fixed
+          form: materials, contents, sizes, material values, analyses, the task and the settings.</p></div>
+        <div class="step"><span class="n">2</span><h3>The rules check</h3>
+          <p>Every material must be named in the sentence and every number must be in it, or follow from its numbers by a
+          calculation that is shown. What the rules read from explicit words (shapes, sizes with units, ranges, measured
+          values) stands.</p></div>
+        <div class="step"><span class="n">3</span><h3>The summary asks</h3>
+          <p>The summary lists what was read, calculated or corrected and where the model and the rules differ. What only you
+          can give is asked; the rest comes with a recommended answer, or "decide for me".</p></div>
+        <div class="step"><span class="n">4</span><h3>MPSim runs it</h3>
+          <p>Run starts it in MPSim - the input validated and its RVE planned by MPSim itself - or the case opens in MPSim's
+          tabs to be edited by hand.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="freely">
+    <div class="wrap">
+      <h2>Write freely</h2>
+      <p class="sub">The requests below are read as shown (Korean examples as typed). Nothing has to follow a template.</p>
+      <table class="bench ex-table">
+        <tr><th>Request</th><th>Read as</th></tr>
+        <tr><td lang="ko">에폭시에 알루미나 반 정도 섞으면 열이 얼마나 잘 빠질까?</td><td>alumina 50 % in epoxy · thermal conductivity</td></tr>
+        <tr><td>epoxy with alumina, 55%, actually make that 60%, thermal conductivity</td><td>60 % (the correction)</td></tr>
+        <tr><td lang="ko">알루미나는 아니고 질화붕소를 에폭시에 30% 넣은 경우 열전도도</td><td>boron nitride only</td></tr>
+        <tr><td lang="ko">열전도도는 필요없고 CTE만 봐줘, 에폭시에 실리카 50%</td><td>CTE only</td></tr>
+        <tr><td lang="ko">TIM 용도로 실리콘에 질화알루미늄 70% 넣을 건데 성능 괜찮을까</td><td>thermal conductivity, from the purpose</td></tr>
+        <tr><td lang="ko">에폭시에알루미나55%넣고열전도도구해줘</td><td>no spaces needed</td></tr>
+        <tr><td lang="ko">epoxy에 alumina 55vol% 넣어서 thermal conductivity 계산해줘</td><td>Korean and English mixed</td></tr>
+        <tr><td lang="ko">에폭씨에 시리카 오십퍼 유젼율</td><td>silica 50 % in epoxy · permittivity (typing errors, spoken numbers)</td></tr>
+        <tr><td>silcone with 50% alumnia, thermal</td><td>silicone, alumina - by spelling and sound</td></tr>
+        <tr><td lang="ko">실리콘 200g, 질화붕소 50g 넣으면 열전도도 얼마</td><td>20 wt%, the calculation shown</td></tr>
+        <tr><td lang="ko">에폭시랑 알루미나 비율을 4대6으로 해서 열전도도</td><td>60 %, the calculation shown</td></tr>
+        <tr><td lang="ko">k가 25 W/mK인 알루미나를 에폭시에 50% 넣었을 때 열전도도</td><td>alumina k = 25 over the library's 30, both shown</td></tr>
+        <tr><td lang="ko">BN 판상인데 지름 20마이크로 두께 1마이크로, 실리콘에 30% 열전도</td><td>platelets 20 µm × 1 µm</td></tr>
+        <tr><td lang="ko">에폭시에 알루미나를 40에서 60까지 바꿔가며 열전도도 어떻게 변하나 보고싶어</td><td>a DOE study, 40 - 60 %</td></tr>
+        <tr><td lang="ko">에폭시 알루미나 40%에서 1.1, 60%에서 2.3 W/mK 나왔어. 맞춰줘</td><td>a calibration to two measurements</td></tr>
+        <tr><td lang="ko">알루미나랑 질화붕소 중에 에폭시에 30% 넣었을 때 어느 쪽이 열전도도 더 높은지 비교해줘</td><td>asked: each on its own (two runs), never one mixture</td></tr>
+        <tr><td lang="ko">열전도도랑 CTE 둘 다 궁금한데, 에폭시에 알루미나를 절반보다 살짝 많이 넣은 경우야</td><td>asked: "a bit more than half" is not a number</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section id="checks">
+    <div class="wrap">
+      <h2>Nothing is made up</h2>
+      <p class="sub">The model's answer is a reading to be checked, never a fact. Whatever fails a check is dropped and
+        asked for; the summary says what was dropped and why.</p>
+      <div class="grid">
+        <div class="card"><span class="tag ai">Materials</span><h3>Named in the sentence</h3>
+          <ul><li>As written, by spelling or by sound - a material the model brought in itself is dropped</li>
+          <li>A longer, more specific name wins (crystalline silica is quartz, not silica)</li>
+          <li>A word that names several materials (silicone or silicon, which glass) is read by its role, or asked</li></ul></div>
+        <div class="card"><span class="tag ai">Numbers</span><h3>In the sentence, or shown</h3>
+          <ul><li>Every number is said, or follows from the sentence's numbers by a calculation the summary shows: 4:6, grams
+          and parts, nm to µm, half, a quarter</li><li>A vague amount is asked, never guessed</li>
+          <li>Sizes need a unit or a size word; a spread needs a spread word</li></ul></div>
+        <div class="card"><span class="tag ai">Material values</span><h3>Yours or the library's</h3>
+          <ul><li>A value you give (k, E, CTE, permittivity) is used over the library's, both shown</li>
+          <li>A value the model knows from elsewhere is never used</li><li>A material the library lacks is asked about</li></ul></div>
+        <div class="card"><span class="tag ai">Analyses</span><h3>Pointed to by a word</h3>
+          <ul><li>Named, described ("will it flow") or implied by a purpose ("for a TIM")</li>
+          <li>An analysis the sentence gives no reason for is asked</li></ul></div>
+        <div class="card"><span class="tag ai">Taking back</span><h3>Corrections win</h3>
+          <ul><li>"55%, no, 60%", "not alumina", "skip the thermal part", <span lang="ko">"BN은 빼고"</span>: the model's reading of what was taken back stands</li>
+          <li>Otherwise what the rules read exactly and the model left out comes back</li></ul></div>
+        <div class="card"><span class="tag ai">Without a model</span><h3>The rules read alone</h3>
+          <ul><li>No model, a model that does not answer, or <code>{"llm": "off"}</code>: the rules read the request as in 0.1</li>
+          <li>A broken answer never stops the tab</li></ul></div>
+      </div>
+      <figure class="shot" style="margin-top:22px">
+        <img src="assets/ai_props.png" width="1500" height="950" loading="lazy"
+             alt="A request giving the filler's thermal conductivity: the summary uses the value given and shows the library's next to it">
+      </figure>
+      <p class="note" style="margin-top:8px">A material value given in the request (<span lang="ko">"k가 25 W/mK인 알루미나"</span>) is used over
+        the library's, and the summary says so; the case then opens in MPSim's tabs with that value.</p>
+    </div>
+  </section>
+
+  <section id="model">
+    <div class="wrap">
+      <h2>The local model</h2>
+      <p class="sub">Qwen3.5-2B (Apache 2.0, the Qwen team), run by llama.cpp's server (MIT), ships in the offline package and
+        runs on the CPU - no internet, no account, no data leaving the PC. It starts when the AI tab is opened and stops after
+        15 minutes unused, giving its memory back to the solvers.</p>
+      <div class="stats">
+        <div class="stat"><b>1.2 GB</b><span>model file (4-bit), in the offline package</span></div>
+        <div class="stat"><b>3-4 s</b><span>per request on a laptop CPU, after under a minute to start once</span></div>
+        <div class="stat"><b>~2 GB</b><span>memory while it runs, 4 threads so that the solvers keep their cores</span></div>
+        <div class="stat"><b>0</b><span>bytes sent anywhere: it listens on 127.0.0.1 only and ends with MPSim</span></div>
+      </div>
+      <h3 style="margin:30px 0 8px">Four open models, one test</h3>
+      <p class="note" style="margin:0 0 8px">The same checks and the 50 held-out requests, on an Intel Core Ultra 5 125H laptop
+        (right / asked / wrong):</p>
+      <table class="bench">
+        <tr><th>Model (4-bit GGUF, Apache 2.0)</th><th>File</th><th>Right</th><th>Asked</th><th>Wrong</th><th>Per request</th></tr>
+        <tr><td><b>Qwen3.5-2B</b> (in the package)</td><td>1.2 GB</td><td>38</td><td>9</td><td>3</td><td>2.7 s</td></tr>
+        <tr><td>Qwen3.5-4B (add-on)</td><td>2.6 GB</td><td>42</td><td>7</td><td>1</td><td>6.9 s</td></tr>
+        <tr><td>Gemma 4 E2B</td><td>2.6 GB</td><td>37</td><td>9</td><td>4</td><td>7.8 s</td></tr>
+        <tr><td>Granite 4.2 3B</td><td>2.1 GB</td><td>37</td><td>9</td><td>4</td><td>14.2 s</td></tr>
+      </table>
+      <p class="note" style="margin-top:10px">The checks of this release came after this comparison and read more of these
+        requests (see Verification). The larger Qwen makes fewer readings that need a question, at two and a half times the
+        time and twice the memory; it is offered as an add-on.</p>
+    </div>
+  </section>
+
+  <section id="verification">
+    <div class="wrap">
+      <h2>Verification</h2>
+      <p class="sub">The AI tab is checked on the inputs it makes, not on the analyses - those are MPSim's, verified by its own
+        88 problems with known solutions. Every request has its answer written down; a reading is right, asked (left open
+        and asked: safe) or wrong.</p>
+      <div class="stats">
+        <div class="stat"><b>27/30</b><span>right of the 30 requests written last, read with the 2B model (28/30 with the 4B, none wrong; on their first reading, before the three fixes they led to, 25 and 27)</span></div>
+        <div class="stat"><b>118/118</b><span>hand-written requests read as written through the model, inputs accepted by MPSim</span></div>
+        <div class="stat"><b>0 missed</b><span>in 309 generated requests sampled from every kind and read through the model; one wrong, fixed after the run</span></div>
+        <div class="stat"><b>0</b><span>wrong inputs from the rules alone in 5,002 generated requests</span></div>
+      </div>
+      <h3 style="margin:30px 0 8px">Requests as people write them</h3>
+      <table class="bench">
+        <tr><th>Set</th><th>Rules alone</th><th>Qwen3.5-2B + checks</th></tr>
+        <tr><td>114 requests the checks were developed on</td><td>45 / 35 / 34</td><td><b>106 / 7 / 1</b></td></tr><tr><td>50 held out, then used for changes</td><td>23 / 14 / 13</td><td><b>44 / 6 / 0</b></td></tr><tr><td>40 held out, then used for changes</td><td>19 / 9 / 12</td><td><b>39 / 1 / 0</b></td></tr><tr><td>30 written last (three fixes followed their first reading)</td><td>14 / 6 / 10</td><td><b>27 / 1 / 2</b></td></tr>
+      </table>
+      <p class="note" style="margin-top:10px">Right / asked / wrong. The sets cover roundabout wording, corrections, words taken
+        back, spacing, mixed languages, typing errors, amounts and ratios, material values, sizes, settings, studies,
+        calibrations, vague amounts and sentences that are not requests. <code>python AIMPSim/tests/freeform.py</code>
+        (<code>--llm &lt;llama-server&gt; &lt;model&gt;</code> for the model), <code>run_tests.py</code>,
+        <code>exhaustive.py</code>.</p>
+    </div>
+  </section>
+
+  <section id="download">
+    <div class="wrap">
+      <h2>Download and install</h2>
+      <div class="two">
+        <div class="card"><h3>PC without internet</h3>
+          <p>Download <code>AIMPSim-0.2.0-offline-win64.zip</code> from the
+          <a href="https://github.com/HyoseokByun-opt/AIMPSim/releases/latest">latest release</a>: MPSim with the AI tab, the
+          model and its server, the Python runtime, every wheel and openEMS. Unzip to a short path such as
+          <code>C:\AIMPSim</code>, run <code>1_INSTALL_OFFLINE.bat</code>, then <code>2_RUN_LOCAL.bat</code>.</p>
+          <p style="margin-top:8px">For the 4B model, unzip its two add-on parts into the same folder; the AI tab then uses it.</p></div>
+        <div class="card"><h3>PC with internet and conda</h3>
+          <pre><code>git clone https://github.com/HyoseokByun-opt/AIMPSim.git C:\AIMPSim
+cd C:\AIMPSim
+1_INSTALL.bat
+AIMPSim\GET_AI_MODEL.bat
+2_RUN_LOCAL.bat</code></pre>
+          <p style="margin-top:8px"><code>GET_AI_MODEL.bat --model qwen3.5-4b</code> for the larger model; every download is checked by SHA-256.</p></div>
+      </div>
+      <p class="note" style="margin-top:14px">AIMPSim is MPSim with the AI tab; every change of MPSim is published to both.
+        MPSim's user guides apply unchanged:
+        <a href="https://github.com/HyoseokByun-opt/MPSim/releases/latest/download/MPSim-User-Guide-EN.pdf">English (PDF)</a> ·
+        <a href="https://github.com/HyoseokByun-opt/MPSim/releases/latest/download/MPSim-User-Guide-KO.pdf">Korean (PDF)</a>.
+        The AI tab is described in the <a href="https://github.com/HyoseokByun-opt/AIMPSim/blob/main/AIMPSim/docs/GUIDE_KO.md">Korean guide</a>
+        and the <a href="https://github.com/HyoseokByun-opt/AIMPSim#readme">README</a>.</p>
+    </div>
+  </section>
+
+  <section id="cite">
+    <div class="wrap">
+      <h2>MPSim inside</h2>
+      <p class="sub">The analyses, solvers, checks, presets and guides are MPSim's: effective properties of semiconductor
+        materials from their 3D microstructure on voxel RVEs. Published work cites MPSim and the solvers that produced the
+        results - see <a href="https://hyoseokbyun-opt.github.io/MPSim/#cite">MPSim</a>.</p>
+      <h3 style="margin:30px 0 6px">Author</h3>
+      <p><b>Hyoseok Byun</b> — <a href="https://github.com/HyoseokByun-opt">GitHub</a> ·
+        <a href="https://www.linkedin.com/in/hyoseok-byun-72992120a">LinkedIn</a></p>
+      <p class="note"><b>Declaration of AI assistance.</b> The code and the tests were written with the assistance of Claude
+        (Anthropic), an AI assistant, under the author's direction. The author reviewed the output and takes full
+        responsibility for the content.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>AIMPSim · MPSim with requests in words · MIT License</span>
+    <span>Model: Qwen3.5-2B (Apache 2.0) · llama.cpp (MIT) · MPSim</span>
+  </div>
+</footer>
+</body>
+</html>
