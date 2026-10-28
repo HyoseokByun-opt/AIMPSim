@@ -1,0 +1,9 @@
+{
+  "llm": {
+    "server_exe": "C:/llama/llama-server.exe",
+    "model": "C:/models/model-Q4_K_M.gguf",
+    "port": 8089,
+    "threads": 4,
+    "timeout_s": 60
+  }
+}

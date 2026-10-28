@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.nbi
+*.nbc
+
+# environments and the offline package (tools/build_offline.py writes them)
+/env/
+/python/
+/runtime/
+/wheels/
+/tools/openEMS/
+/Download/
+/GitHub/
+/GitHubAI/
+/ReleaseAI/
+/Release/
+/docs/*.pdf
+
+# results, solver logs and local settings
+/workspace/
+logs/
+settings.json
+.session_secret
+
+# editors and the operating system
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# the local model's settings of this PC
+AIMPSim/aimpsim_config.json

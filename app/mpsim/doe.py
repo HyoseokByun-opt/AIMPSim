@@ -1,0 +1,347 @@
+"""Design of experiments over the input form.
+
+A DOE varies numeric entries of the job form - filler content, particle size,
+aspect ratio, interfacial resistance, voxel size, a material property - over
+ranges and produces one complete form per case. "mix.<i>" is the share of
+phase i in the filler (% of the filler) with the total filler content kept:
+the other fillers take the rest in their own proportions. The cases are ordinary runs,
+so every result, figure and report of a DOE case is the same as for a case
+entered by hand.
+
+Linked inputs (links.py): a parameter may set further entries of the form,
+the same value or a function of the parameters ("phases.1.r_int = x",
+"contact_rc.0-1 = sqrt(x1*x2)"), so that one quantity that appears in several
+places - the interfacial resistance of two grades of one filler - is one
+factor of the design.
+
+Designs:
+    full    full factorial over all parameter levels
+    oat     one factor at a time around the centre level (the reference case
+            plus the levels of each parameter in turn)
+    lhs     Latin hypercube sampling of the ranges (stratified, one sample per
+            stratum per parameter)
+"""
+from __future__ import annotations
+
+import copy
+import itertools
+import math
+
+import numpy as np
+
+from . import links as LK
+
+MAX_CASES = 64
+
+
+def set_path(obj, path, value):
+    keys = path.split(".")
+    node = obj
+    for k in keys[:-1]:
+        if k.isdigit():
+            node = node[int(k)]
+        else:
+            node = node.setdefault(k, {})
+    last = keys[-1]
+    if last.isdigit():
+        node[int(last)] = value
+    else:
+        node[last] = value
+
+
+def get_path(obj, path):
+    node = obj
+    for k in path.split("."):
+        if node is None:
+            return None
+        node = node[int(k)] if k.isdigit() else node.get(k)
+    return node
+
+
+def levels(p):
+    """Explicit levels of one parameter."""
+    if p.get("values"):
+        return [float(v) for v in p["values"]]
+    lo, hi = float(p["min"]), float(p["max"])
+    n = max(int(p.get("steps", 3)), 1)
+    if n == 1 or hi == lo:
+        return [lo]
+    if p.get("scale") == "log" and lo > 0 and hi > 0:
+        return [float(x) for x in np.geomspace(lo, hi, n)]
+    return [float(x) for x in np.linspace(lo, hi, n)]
+
+
+def _from_unit(p, u):
+    if p.get("values"):
+        v = [float(x) for x in p["values"]]
+        return v[min(int(u * len(v)), len(v) - 1)]
+    lo, hi = float(p["min"]), float(p["max"])
+    if p.get("scale") == "log" and lo > 0 and hi > 0:
+        return float(10 ** (math.log10(lo) + u * (math.log10(hi) - math.log10(lo))))
+    return float(lo + u * (hi - lo))
+
+
+def _fmt(v):
+    a = abs(v)
+    if a != 0 and (a < 1e-3 or a >= 1e5):
+        return f"{v:.3g}"
+    return f"{round(v, 6):g}"
+
+
+# entries a DOE sets to whole numbers
+INTEGER_PATHS = ("rve.seed", "rve.N")
+
+
+def expand(parameters, design="full", samples=12, seed=1):
+    """-> list of {values: {path: value}, label: str}"""
+    parameters = [p for p in parameters if p.get("path")]
+    if not parameters:
+        return []
+    paths = [p["path"] for p in parameters]
+    labels = [p.get("label") or p["path"] for p in parameters]
+    combos = []
+    if design == "lhs":
+        n = max(int(samples), 2)
+        rng = np.random.default_rng(int(seed))
+        cols = []
+        for p in parameters:
+            u = (rng.permutation(n) + rng.random(n)) / n
+            cols.append([_from_unit(p, x) for x in u])
+        combos = [tuple(col[i] for col in cols) for i in range(n)]
+    elif design == "oat":
+        lv = [levels(p) for p in parameters]
+        centre = tuple(v[len(v) // 2] for v in lv)
+        combos = [centre]
+        for i, v in enumerate(lv):
+            for x in v:
+                if x == centre[i]:
+                    continue
+                c = list(centre)
+                c[i] = x
+                combos.append(tuple(c))
+    else:
+        combos = list(itertools.product(*[levels(p) for p in parameters]))
+    out = []
+    for c in combos[:MAX_CASES]:
+        # a seed or a grid size is a whole number
+        c = tuple(float(round(v)) if path in INTEGER_PATHS else v for path, v in zip(paths, c))
+        values = {path: float(v) for path, v in zip(paths, c)}
+        label = " · ".join(f"{lab} {_fmt(v)}" for lab, v in zip(labels, c))
+        out.append({"values": values, "label": label})
+    return out
+
+
+def _fillers(form):
+    """Indices of the filler phases (solid particles, not pores or networks)."""
+    out = []
+    for k, ph in enumerate(form.get("phases") or []):
+        props = ph.get("props") or {}
+        if ph.get("shape") == "network" or (props.get("E") is not None and float(props["E"]) <= 0):
+            continue
+        out.append(k)
+    return out
+
+
+def filler_share(form, i):
+    """Share of phase i in the filler content (%), or None."""
+    fill = _fillers(form)
+    if i not in fill or len(fill) < 2:
+        return None
+    vals = [float(get_path(form, f"phases.{k}.fraction.value") or 0.0) for k in fill]
+    tot = sum(vals)
+    return 100.0 * vals[fill.index(i)] / tot if tot > 0 else None
+
+
+def set_filler_share(form, i, share):
+    """Phase i takes `share` % of the filler; the total filler content stays
+    and the other fillers share the rest in their present proportions."""
+    fill = _fillers(form)
+    if i not in fill or len(fill) < 2:
+        raise ValueError(f"Phase {i + 1} is not one of two or more fillers; its share cannot be set")
+    bases = {(form["phases"][k].get("fraction") or {}).get("basis", "vol") for k in fill}
+    if len(bases) > 1:
+        raise ValueError("A filler share needs every filler content on the same basis (all vol% or all wt%)")
+    share = float(share)
+    if not 0.0 <= share <= 100.0:
+        raise ValueError(f"A share of the filler must lie between 0 and 100 % ({share:g})")
+    vals = {k: float(form["phases"][k]["fraction"]["value"]) for k in fill}
+    tot = sum(vals.values())
+    others = [k for k in fill if k != i]
+    rest_old = sum(vals[k] for k in others)
+    new_i = tot * share / 100.0
+    form["phases"][i]["fraction"]["value"] = round(new_i, 9)
+    for k in others:
+        w = vals[k] / rest_old if rest_old > 0 else 1.0 / len(others)
+        form["phases"][k]["fraction"]["value"] = round((tot - new_i) * w, 9)
+
+
+def linked(parameters, values):
+    """{path: value} that the links of `parameters` set for the factor values
+    `values` ({path: value} of the parameters themselves)."""
+    params = [p for p in parameters or [] if p.get("path")]
+    if not any(p.get("links") for p in params):
+        return {}
+    try:
+        vals = [float(values[p["path"]]) for p in params]
+    except KeyError as e:
+        raise ValueError(f"No value for the parameter {e.args[0]}") from None
+    return LK.linked_values(params, vals)
+
+
+def check_links(parameters, form):
+    """Messages for links that cannot be applied to this form (empty: fine):
+    a bad expression, an entry set twice, a target the form does not have."""
+    params = [p for p in parameters or [] if p.get("path")]
+    known = {c["path"] for c in parameter_catalogue(form)}
+
+    def allowed(path):
+        if path in known:
+            return None
+        return "this entry is not one a study can set in this case"
+    return LK.check(params, [p["path"] for p in params], allowed)
+
+
+def apply_case(base_form, case, index=None, parameters=None):
+    """Complete form of one case (the base form with the parameters set).
+    `parameters`: the study's parameters, whose links set further entries."""
+    form = copy.deepcopy(base_form)
+    mix = []
+    values = dict(case["values"])
+    for path, value in linked(parameters, case["values"]).items():
+        values.setdefault(path, value)
+    for path, value in values.items():
+        if path.startswith("mix."):
+            mix.append((int(path.split(".")[1]), value))
+        else:
+            set_path(form, path, value)
+    for i, value in mix:                       # after the contents themselves
+        set_filler_share(form, i, value)
+    base_name = (base_form.get("name") or "DOE case").strip()
+    form["name"] = f"{base_name} · {case['label']}" if case.get("label") else base_name
+    if index is not None:
+        form["_doe_index"] = index
+    return form
+
+
+def parameter_catalogue(form):
+    """Numeric entries of this form that a DOE can vary, for the browser."""
+    out = [
+        {"path": "rve.voxel_um", "label": "Voxel size", "unit": "µm", "group": "Domain"},
+        {"path": "rve.L_um", "label": "RVE edge length", "unit": "µm", "group": "Domain"},
+        {"path": "rve.N", "label": "Grid size", "unit": "voxels", "group": "Domain"},
+        {"path": "rve.seed", "label": "Random seed (one realisation of the structure)", "unit": "-", "group": "Domain",
+         "integer": True},
+        {"path": "rve.T_um", "label": "Film thickness (thin-film domain)", "unit": "µm", "group": "Domain"},
+        {"path": "rve.shear_strain", "label": "Strain of the shear flow (arrangement after shear flow)", "unit": "-",
+         "group": "Domain"},
+        {"path": "options.particle_gap_vox", "label": "Gap between particles (0 = they may touch)", "unit": "voxels",
+         "group": "Structure"},
+        {"path": "options.delta_T", "label": "ΔT", "unit": "K", "group": "Options"},
+        {"path": "options.mechtest.value", "label": "Load of the mechanical test", "unit": "N, MPa, µm or %",
+         "group": "Options"},
+        {"path": "rve.dispersion.ratio", "label": "Dispersion gradient: loading ratio", "unit": "-", "group": "Domain"},
+        {"path": "rve.dispersion.share", "label": "Dispersion clusters: share of the particles", "unit": "%",
+         "group": "Domain"},
+        {"path": "rve.dispersion.cluster_vol", "label": "Dispersion clusters: box volume", "unit": "%",
+         "group": "Domain"},
+        {"path": "rve.dispersion.to", "label": "Dispersion region: end", "unit": "%", "group": "Domain"},
+        {"path": "options.thickness_mm", "label": "Layer thickness", "unit": "mm", "group": "Options"},
+        {"path": "options.filtration.face_velocity_m_s", "label": "Filtration face velocity", "unit": "m/s", "group": "Options"},
+        {"path": "options.viscosity.gd_ref", "label": "Shear rate (viscosity)", "unit": "1/s", "group": "Options"},
+        {"path": "rve.press_compression", "label": "Compression along z (arrangement after compression)", "unit": "%",
+         "group": "Domain"},
+        {"path": "rve.press_rate", "label": "Strain rate of the compression", "unit": "1/s", "group": "Domain"},
+        {"path": "rve.press_mold_C", "label": "Mould temperature (compression with cure)", "unit": "°C", "group": "Domain"},
+        {"path": "rve.press_stress_Pa", "label": "Axial stress of the press (compression with cure)", "unit": "Pa",
+         "group": "Domain"},
+        {"path": "rve.press_part_mm", "label": "Part thickness (compression with cure)", "unit": "mm", "group": "Domain"},
+        {"path": "options.thermomech.T_ref", "label": "Stress-free temperature (thermal stress)", "unit": "°C",
+         "group": "Options"},
+        {"path": "options.thermomech.T_bottom", "label": "Bottom face temperature (thermal stress)", "unit": "°C",
+         "group": "Options"},
+        {"path": "options.thermomech.T_top", "label": "Top face temperature (thermal stress)", "unit": "°C",
+         "group": "Options"},
+        {"path": "options.thermomech.substrate.thickness_um", "label": "Substrate thickness (thermal stress)", "unit": "µm",
+         "group": "Options"},
+        {"path": "options.joule.T_amb", "label": "Ambient temperature (Joule heating)", "unit": "°C", "group": "Options"},
+        {"path": "options.joule.R_th", "label": "Thermal resistance to ambient (Joule heating)", "unit": "K·m²/W",
+         "group": "Options"},
+        {"path": "matrix.props.k", "label": "Matrix thermal conductivity", "unit": "W/m·K", "group": "Matrix"},
+        {"path": "matrix.props.alpha", "label": "Matrix CTE", "unit": "ppm/K", "group": "Matrix"},
+        {"path": "matrix.props.E", "label": "Matrix Young's modulus", "unit": "GPa", "group": "Matrix"},
+        {"path": "matrix.props.eps_r", "label": "Matrix permittivity", "unit": "-", "group": "Matrix"},
+    ]
+    for i in _fillers(form):
+        sh = filler_share(form, i)
+        if sh is not None:
+            name = form["phases"][i].get("name") or f"Phase {i+1}"
+            out.append({"path": f"mix.{i}", "label": f"{name}: share of the filler (total kept)", "unit": "% of filler",
+                        "group": "Filler mix", "current": sh})
+    for i, ph in enumerate(form.get("phases") or []):
+        name = ph.get("name") or f"Phase {i+1}"
+        g = f"{name}"
+        out += [
+            {"path": f"phases.{i}.fraction.value", "label": f"{name}: content", "unit": "%", "group": g},
+            {"path": f"phases.{i}.size.d", "label": f"{name}: diameter", "unit": {"um": "µm"}.get(ph.get("size", {}).get("unit", "um"), ph.get("size", {}).get("unit", "um")), "group": g},
+        ]
+        if ph.get("shape") == "spheroid":
+            out.append({"path": f"phases.{i}.size.aspect", "label": f"{name}: aspect ratio", "unit": "-", "group": g})
+        un = ph.get("size", {}).get("unit", "um")
+        if ph.get("shape") in ("cylinder", "spherocylinder"):
+            out.append({"path": f"phases.{i}.size.length", "label": f"{name}: length", "unit": un, "group": g})
+        if ph.get("shape") in ("cuboid", "superellipsoid"):
+            out += [{"path": f"phases.{i}.size.ly", "label": f"{name}: edge b", "unit": un, "group": g},
+                    {"path": f"phases.{i}.size.lz", "label": f"{name}: edge c", "unit": un, "group": g}]
+        if ph.get("shape") == "superellipsoid":
+            out.append({"path": f"phases.{i}.size.n", "label": f"{name}: blockiness n", "unit": "-", "group": g})
+        if ph.get("shape") in ("spheroid", "cylinder", "cuboid", "superellipsoid"):
+            out.append({"path": f"phases.{i}.stack_layers", "label": f"{name}: stacked platelets (layers)", "unit": "-",
+                        "group": g})
+        if ph.get("shape") == "helix":
+            out += [{"path": f"phases.{i}.size.coil_d", "label": f"{name}: coil diameter", "unit": un, "group": g},
+                    {"path": f"phases.{i}.size.pitch", "label": f"{name}: pitch", "unit": un, "group": g},
+                    {"path": f"phases.{i}.size.turns", "label": f"{name}: turns", "unit": "-", "group": g}]
+        if (ph.get("dist") or {}).get("type") in ("lognormal", "normal"):
+            out.append({"path": f"phases.{i}.dist.std", "label": f"{name}: standard deviation of the size",
+                        "unit": ph.get("size", {}).get("unit", "um"), "group": g})
+        if (ph.get("orientation") or {}).get("mode") != "iso":
+            out.append({"path": f"phases.{i}.orientation.spread_deg", "label": f"{name}: orientation spread", "unit": "°", "group": g})
+        if (ph.get("shell") or {}).get("enabled"):
+            out.append({"path": f"phases.{i}.shell.thickness", "label": f"{name}: shell thickness", "unit": ph.get("size", {}).get("unit", "um"), "group": g})
+        if (ph.get("section") or {}).get("mode") == "section":
+            out += [{"path": f"phases.{i}.section.from", "label": f"{name}: section from", "unit": "% of edge", "group": g},
+                    {"path": f"phases.{i}.section.to", "label": f"{name}: section to", "unit": "% of edge", "group": g}]
+        out += [
+            {"path": f"phases.{i}.r_int", "label": f"{name}: interfacial resistance R_int", "unit": "m²K/W", "group": g},
+            {"path": f"phases.{i}.props.sigma", "label": f"{name}: electrical conductivity", "unit": "S/m", "group": g},
+            {"path": f"phases.{i}.props.eps_r", "label": f"{name}: permittivity", "unit": "-", "group": g},
+            {"path": f"phases.{i}.r_contact", "label": f"{name}: contact resistance R_c", "unit": "m²K/W", "group": g},
+            {"path": f"phases.{i}.props.k", "label": f"{name}: thermal conductivity", "unit": "W/m·K", "group": g},
+            {"path": f"phases.{i}.props.E", "label": f"{name}: Young's modulus", "unit": "GPa", "group": g},
+            {"path": f"phases.{i}.props.alpha", "label": f"{name}: CTE", "unit": "ppm/K", "group": g},
+        ]
+    for k, mr in enumerate(form.get("matrix_regions") or []):
+        name = mr.get("name") or f"Matrix {k + 2}"
+        out += [{"path": f"matrix_regions.{k}.section.from", "label": f"{name}: section from", "unit": "% of edge",
+                 "group": "Matrix regions"},
+                {"path": f"matrix_regions.{k}.section.to", "label": f"{name}: section to", "unit": "% of edge",
+                 "group": "Matrix regions"},
+                {"path": f"matrix_regions.{k}.props.k", "label": f"{name}: thermal conductivity", "unit": "W/m·K",
+                 "group": "Matrix regions"},
+                {"path": f"matrix_regions.{k}.props.E", "label": f"{name}: Young's modulus", "unit": "GPa",
+                 "group": "Matrix regions"}]
+    # contact resistance between two different fillers (the pair entry of
+    # the contact matrix; empty takes the mean of the two fillers' own)
+    fill = [k for k in _fillers(form) if (form["phases"][k].get("shape") != "network")]
+    for a_, b_ in itertools.combinations(fill, 2):
+        na = form["phases"][a_].get("name") or f"Phase {a_+1}"
+        nb = form["phases"][b_].get("name") or f"Phase {b_+1}"
+        out.append({"path": f"contact_rc.{a_}-{b_}", "label": f"Contact resistance {na} – {nb}", "unit": "m²K/W",
+                    "group": "Contacts between fillers"})
+    for p in out:
+        if not p["path"].startswith("mix."):
+            try:
+                p["current"] = get_path(form, p["path"])
+            except (IndexError, KeyError, TypeError, ValueError, AttributeError):
+                p["current"] = None
+    return out

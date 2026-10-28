@@ -1,0 +1,1746 @@
+"""The web front-end: the engine over HTTP.
+
+It drives `mpsim/` exactly as the command line does - the engine has no idea
+which front-end is asking - so a browser and a script cannot disagree about a
+result.
+
+Design notes:
+
+* **Owners.** Every browser gets an id in a signed cookie; its run list shows
+  its own jobs. A result link can still be opened by anyone who has it, which
+  is how a result is shared with a colleague.
+* **The browser is optional.** Run state lives in `jobs.py` and on disk.
+* **No CDN.** vtk.js and all CSS/JS ship with the page; an analysis server
+  often sits on an isolated network.
+* **Access.** `--token` is a door lock for a lab network, not authentication.
+"""
+from __future__ import annotations
+
+import copy
+import io
+import json
+import math
+import os
+import sys
+import re
+import secrets
+import shutil
+import time
+import zipfile
+from importlib import metadata
+
+from flask import (Flask, abort, jsonify, render_template, request, send_file,
+                   send_from_directory, session, Response)
+from flask.json.provider import DefaultJSONProvider
+
+from mpsim import __version__
+from mpsim import materials as M
+from mpsim import rve as R
+from mpsim import spec as S
+
+from .doe import DOEStore
+from .jobs import STOPPED_FILE, JobQueue
+from .render_worker import RenderService
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.abspath(os.path.join(HERE, ".."))
+PRESETS = os.path.join(ROOT, "mpsim", "data", "presets.json")
+
+
+def _clean(o):
+    if isinstance(o, dict):
+        return {str(k): _clean(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_clean(v) for v in o]
+    if isinstance(o, float):
+        return o if math.isfinite(o) else None
+    try:
+        import numpy as np
+        if isinstance(o, np.generic):
+            return _clean(o.item())
+        if isinstance(o, np.ndarray):
+            return _clean(o.tolist())
+    except Exception:                                          # noqa: BLE001
+        pass
+    return o
+
+
+class SafeJSON(DefaultJSONProvider):
+    """NaN is not JSON; a browser's JSON.parse rejects the whole response."""
+    ensure_ascii = False
+    sort_keys = False
+
+    def dumps(self, obj, **kw):
+        kw.setdefault("ensure_ascii", False)
+        return json.dumps(_clean(obj), **kw)
+
+
+def versions():
+    """Package versions without importing the heavy packages into the web
+    process. conda-forge's NASA PuMA is not registered under a pip name, so
+    its version is read from pumapy/version.py."""
+    import importlib.util
+    import re
+    out = {"mpsim": __version__}
+    for dist in ("puma", "porespy", "pyvista", "vtk", "scikit-rf", "numba", "numpy", "scipy", "flask"):
+        try:
+            out[dist] = metadata.version(dist)
+        except Exception:                                      # noqa: BLE001
+            out[dist] = None
+    if out["puma"] is None:
+        try:
+            import glob
+            import sys
+            hits = glob.glob(os.path.join(sys.prefix, "conda-meta", "puma-[0-9]*.json"))
+            if hits:
+                m = re.match(r"puma-([0-9][^-]*)-", os.path.basename(hits[0]))
+                out["puma"] = m.group(1) if m else "installed"
+            elif importlib.util.find_spec("pumapy") is not None:
+                out["puma"] = "installed"
+        except Exception:                                      # noqa: BLE001
+            pass
+    return out
+
+
+# The workspace the program was last pointed at, kept beside the program so a
+# restart (or 2_RUN_LOCAL.bat) opens it again, as a simulation project keeps
+# its work directory.
+SETTINGS = os.path.join(ROOT, "..", "settings.json")
+DEFAULT_WORKSPACE = os.path.abspath(os.path.join(ROOT, "..", "workspace"))
+
+
+def load_settings():
+    try:
+        with open(SETTINGS, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(d):
+    try:
+        with open(SETTINGS, "w", encoding="utf-8") as fh:
+            json.dump(d, fh, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+
+
+STATE_WORDS = {"queued": "queued", "running": "running", "done": "done", "failed": "failed", "stopped": "stopped"}
+
+
+def html_escape(t):
+    import html as _h
+    return _h.escape(t)
+
+
+def _persistent_secret(workspace):
+    """Session secret kept in the workspace. A new random secret at every start
+    would invalidate every browser's owner cookie, and users would lose their
+    run lists whenever the server restarts."""
+    os.makedirs(workspace, exist_ok=True)
+    path = os.path.join(workspace, ".session_secret")
+    try:
+        with open(path, encoding="ascii") as fh:
+            s = fh.read().strip()
+        if len(s) >= 32:
+            return s
+    except OSError:
+        pass
+    s = secrets.token_hex(32)
+    with open(path, "w", encoding="ascii") as fh:
+        fh.write(s)
+    return s
+
+
+def needed_analyses(spec):
+    return S.required_analyses(spec["analyses"])
+
+
+def create_app(workspace=None, token=None, concurrency=1, limits=None):
+    app = Flask(__name__, static_folder=os.path.join(HERE, "static"),
+                template_folder=os.path.join(HERE, "templates"))
+    app.json = SafeJSON(app)
+    app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
+    # an updated page template takes effect without restarting the server,
+    # like the static scripts it references
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.jinja_env.auto_reload = True
+    remembered = load_settings().get("workspace")
+    if not workspace and remembered and os.path.isdir(remembered):
+        workspace = remembered
+    app.config["WORKSPACE"] = os.path.abspath(workspace or DEFAULT_WORKSPACE)
+    os.makedirs(app.config["WORKSPACE"], exist_ok=True)
+    app.config["SECRET_KEY"] = os.environ.get("MPSIM_SECRET") or _persistent_secret(app.config["WORKSPACE"])
+    app.config["TOKEN"] = token
+    # the largest grid edge: the Machine setting kept in settings.json (500 by
+    # default), unless the command line gave one for this session
+    lim = dict(R.DEFAULT_LIMITS)
+    saved = load_settings().get("max_voxels")
+    if isinstance(saved, (int, float)) and saved >= 0:
+        lim.update(N_max=int(saved), N_max_elastic=int(saved), N_max_flow=int(saved))
+    lim.update({k: v for k, v in (limits or {}).items() if v is not None})
+    app.config["LIMITS"] = lim
+    app.queue = JobQueue(concurrency=concurrency)
+    app.doe = DOEStore(app.config["WORKSPACE"])
+    app.render = RenderService()
+    app.versions = versions()
+
+    # ------------------------------------------------------- work folders
+    # A run belongs to a work folder chosen before it starts, instead of
+    # landing in one shared pile. A folder is an ordinary directory, so it
+    # sorts by name in the file manager - which is why a new one is named for
+    # today by default - and a finished study can be zipped or moved whole.
+    def wf_state():
+        return os.path.join(app.config["WORKSPACE"], "workfolders.json")
+
+    def wf_load():
+        try:
+            with open(wf_state(), encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            d = {}
+        return {"current": d.get("current") or "",
+                "recent": [p for p in (d.get("recent") or []) if isinstance(p, str)],
+                # single runs opened from elsewhere (Runs - Open)
+                "opened": [p for p in (d.get("opened") or []) if isinstance(p, str)]}
+
+    def wf_save(state):
+        try:
+            with open(wf_state(), "w", encoding="utf-8") as fh:
+                json.dump(state, fh, ensure_ascii=False, indent=1)
+        except OSError:
+            pass                                   # a read-only workspace still runs
+
+    def wf_resolve(path):
+        """A bare name becomes a directory in the workspace; an absolute path is
+        taken as given, so a large study can live on another disk."""
+        p = (path or "").strip().strip('"')
+        if not p:
+            raise ValueError("The work folder is missing")
+        if not os.path.isabs(p):
+            bad = set(p) & set('\\/:*?"<>|')
+            if bad:
+                raise ValueError("A folder name must not contain " + " ".join(sorted(bad)))
+            p = os.path.join(app.config["WORKSPACE"], p)
+        return os.path.abspath(p)
+
+    def wf_count(p):
+        """Runs in a work folder, counting both layouts: runs inside case
+        folders, and any bare run left directly in the folder."""
+        n = 0
+        try:
+            entries = os.listdir(p)
+        except OSError:
+            return 0
+        for d in entries:
+            full = os.path.join(p, d)
+            if not os.path.isdir(full):
+                continue
+            if os.path.exists(os.path.join(full, "job.json")):
+                n += 1
+                continue
+            try:
+                n += sum(1 for s in os.listdir(full)
+                         if os.path.exists(os.path.join(full, s, "job.json")))
+            except OSError:
+                pass
+        return n
+
+    def wf_use(path, create=True):
+        p = wf_resolve(path)
+        if not os.path.isdir(p):
+            if not create:
+                raise ValueError(f"There is no work folder at {p}")
+            os.makedirs(p, exist_ok=True)
+        app.config["RUNS_DIR"] = p
+        # runs already in the folder join the list; ones from other folders stay
+        # in the queue untouched, so switching never disturbs work in flight
+        n = app.queue.restore(p)
+        # Open the newest case in the folder, so reopening a folder lands where
+        # the work was left rather than on an empty one. The directory is read
+        # directly rather than through case_list(), which reports the currently
+        # open case even when it belongs to the folder being left behind.
+        app.config["CASE"] = ""
+        found = []
+        try:
+            for name in os.listdir(p):
+                d = os.path.join(p, name)
+                if os.path.isdir(d) and not os.path.exists(os.path.join(d, "job.json")):
+                    found.append((os.path.getmtime(d), name))
+        except OSError:
+            pass
+        app.config["CASE"] = max(found)[1] if found else "case-01"
+        os.makedirs(os.path.join(p, app.config["CASE"]), exist_ok=True)
+        st = wf_load()
+        st["current"] = p
+        st["recent"] = [p] + [q for q in st["recent"]
+                              if os.path.normcase(q) != os.path.normcase(p)]
+        st["recent"] = st["recent"][:12]
+        wf_save(st)
+        return p, n
+
+    # ------------------------------------------------------------- cases
+    # Inside a work folder, each case is its own directory and every run of
+    # that case accumulates under it. One folder is therefore a session's whole
+    # body of work, already sorted: cases side by side, runs in time order
+    # within each.
+    def case_resolve(name):
+        n = (name or "").strip().strip('"')
+        if not n:
+            raise ValueError("The case name is missing")
+        bad = set(n) & set('\\/:*?"<>|')
+        if bad:
+            raise ValueError("A case name must not contain " + " ".join(sorted(bad)))
+        if n in (".", ".."):
+            raise ValueError("That is not a usable case name")
+        return n[:80]
+
+    def case_dir(name=None):
+        c = case_resolve(name if name is not None else app.config.get("CASE") or "")
+        return os.path.join(app.config["RUNS_DIR"], c)
+
+    def case_list():
+        root = app.config["RUNS_DIR"]
+        out = []
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            names = []
+        for n in names:
+            d = os.path.join(root, n)
+            if not os.path.isdir(d) or os.path.exists(os.path.join(d, "job.json")):
+                continue                      # a bare run, not a case
+            try:
+                runs = sum(1 for s in os.listdir(d)
+                           if os.path.exists(os.path.join(d, s, "job.json")))
+            except OSError:
+                runs = 0
+            out.append({"name": n, "runs": runs, "current": n == app.config.get("CASE")})
+        if app.config.get("CASE") and not any(c["name"] == app.config["CASE"] for c in out):
+            out.insert(0, {"name": app.config["CASE"], "runs": 0, "current": True})
+        return out
+
+    def case_use(name, create=True):
+        c = case_resolve(name)
+        d = os.path.join(app.config["RUNS_DIR"], c)
+        if not os.path.isdir(d):
+            if not create:
+                raise ValueError(f"There is no case called {c} in this work folder")
+            os.makedirs(d, exist_ok=True)
+        app.config["CASE"] = c
+        return c
+
+    def case_info():
+        return {"current": app.config.get("CASE") or "", "cases": case_list(),
+                "workfolder": app.config["RUNS_DIR"],
+                "dir": os.path.join(app.config["RUNS_DIR"], app.config.get("CASE") or "")}
+
+    def ws_restore():
+        """Register the runs of every work folder of the workspace (and of the
+        recent folders elsewhere), so the run list holds all of them after a
+        restart or in a new browser - not only the folder open now."""
+        n = 0
+        for row in wf_info()["folders"]:
+            try:
+                n += app.queue.restore(row["path"])
+            except OSError:
+                pass
+        # single runs opened from elsewhere (Runs - Open)
+        for d in wf_load()["opened"]:
+            if os.path.isdir(d):
+                n += app.queue._restore_one(d, os.path.basename(d), os.path.dirname(d), "")
+        return n
+
+    def ws_folders():
+        """The work folders whose runs the list shows: the open one, the
+        recent ones and every folder in the workspace that holds runs."""
+        return [row["path"] for row in wf_info()["folders"]] + [os.path.dirname(d) for d in wf_load()["opened"]]
+
+    def shared():
+        """A server started with an access token is shared by several people:
+        each sees their own runs. Without one it is one person's program, and
+        every run in the workspace is theirs, whichever browser started it."""
+        return bool(app.config.get("TOKEN"))
+
+    def wf_info():
+        cur = app.config["RUNS_DIR"]
+        seen, rows = set(), []
+
+        def add(p):
+            key = os.path.normcase(os.path.abspath(p))
+            if key in seen or not os.path.isdir(p):
+                return
+            seen.add(key)
+            rows.append({"path": os.path.abspath(p), "name": os.path.basename(p.rstrip("\\/")) or p,
+                         "runs": wf_count(p),
+                         "current": key == os.path.normcase(cur)})
+        add(cur)
+        for p in wf_load()["recent"]:
+            add(p)
+        # anything else already sitting in the workspace, so a folder made by
+        # hand in Explorer shows up without having to be typed in
+        try:
+            for d in sorted(os.listdir(app.config["WORKSPACE"])):
+                full = os.path.join(app.config["WORKSPACE"], d)
+                if os.path.isdir(full) and wf_count(full):
+                    add(full)
+        except OSError:
+            pass
+        rows.sort(key=lambda r: (not r["current"], r["name"].lower()))
+        return {"current": cur, "name": os.path.basename(cur), "runs": wf_count(cur),
+                "workspace": app.config["WORKSPACE"], "folders": rows}
+
+    # ----------------------------------------------------------- workspace
+    def ws_use(path, create=True):
+        """Point the program at another workspace: the root every work folder
+        given by name is made in, and where the DOE studies and the list of
+        work folders are kept. Runs in flight finish where they started. The
+        work folder opened is the one last used in that workspace (today's
+        folder for a new one). Remembered across restarts."""
+        p = (path or "").strip().strip('"')
+        if not p:
+            raise ValueError("The workspace path is missing")
+        if not os.path.isabs(p):
+            raise ValueError("Give the workspace as a full path, e.g. D:\\SimData\\MPSim")
+        p = os.path.abspath(p)
+        if not os.path.isdir(p):
+            if not create:
+                raise ValueError(f"There is no folder at {p}")
+            os.makedirs(p, exist_ok=True)
+        probe = os.path.join(p, ".mpsim_write_test")
+        try:
+            with open(probe, "w") as fh:
+                fh.write("ok")
+            os.remove(probe)
+        except OSError as e:
+            raise ValueError(f"The workspace {p} cannot be written to ({e})")
+        app.config["WORKSPACE"] = p
+        app.doe = DOEStore(p)
+        st = wf_load()
+        try:
+            out = wf_use(st["current"] or time.strftime("%Y-%m-%d"))
+        except (ValueError, OSError):
+            out = wf_use(time.strftime("%Y-%m-%d"))
+        try:
+            ws_restore()
+        except Exception:                                            # noqa: BLE001
+            pass
+        s = load_settings()
+        s["workspace"] = p
+        s["recent_workspaces"] = ([p] + [q for q in s.get("recent_workspaces") or []
+                                         if os.path.normcase(q) != os.path.normcase(p)])[:10]
+        save_settings(s)
+        return out
+
+    def ws_info():
+        s = load_settings()
+        rec = [q for q in s.get("recent_workspaces") or [] if os.path.isdir(q)]
+        cur = app.config["WORKSPACE"]
+        if not any(os.path.normcase(q) == os.path.normcase(cur) for q in rec):
+            rec.insert(0, cur)
+        if not any(os.path.normcase(q) == os.path.normcase(DEFAULT_WORKSPACE) for q in rec):
+            rec.append(DEFAULT_WORKSPACE)
+        return {"workspace": cur, "default": DEFAULT_WORKSPACE, "recent": rec}
+
+    _st = wf_load()
+    try:
+        runs_dir, restored = wf_use(_st["current"] or time.strftime("%Y-%m-%d"))
+    except (ValueError, OSError):
+        runs_dir, restored = wf_use(time.strftime("%Y-%m-%d"))
+    print(f"  workspace:   {app.config['WORKSPACE']}")
+    print(f"  work folder: {runs_dir} ({restored} runs restored)")
+    try:
+        more = ws_restore()
+        if more:
+            print(f"  other work folders: {more} runs restored")
+    except Exception as e:                                           # noqa: BLE001
+        print(f"  (the other work folders could not be read: {e})")
+
+    # ------------------------------------------------------------ helpers
+    def owner():
+        sid = session.get("sid")
+        if not sid:
+            sid = secrets.token_hex(8)
+            session["sid"] = sid
+            session.permanent = True
+        return sid
+
+    def owner_or_none():
+        """The established session, or None for a client that keeps no cookie.
+
+        A browser stores the signed cookie and keeps one identity. A script, the
+        command line or curl stores nothing, so `owner()` would mint a fresh
+        throwaway id on every single request and stamp it on the run. Nothing can
+        ever match that id again, and the run becomes invisible in the interface
+        for good - which is what happened to a whole sweep of command-line runs.
+        The queue already treats an ownerless run as visible to everyone, and
+        that is what a run submitted outside a browser should be.
+        """
+        return session.get("sid")
+
+    def job_or_404(jid):
+        job = app.queue.get(jid)
+        if job is None:
+            abort(404, "Run not found")
+        return job
+
+    def safe_path(base, name):
+        p = os.path.abspath(os.path.join(base, name))
+        if not p.startswith(os.path.abspath(base) + os.sep):
+            abort(400)
+        return p
+
+    # ------------------------------------------------------------- guard
+    @app.before_request
+    def _guard():
+        tok = app.config["TOKEN"]
+        if not tok or request.endpoint in ("static", "healthz"):
+            return None
+        given = request.args.get("token") or request.headers.get("X-Token")
+        if given == tok:
+            session["auth"] = tok
+        if session.get("auth") != tok:
+            return Response("<h3>An access token is required</h3><form><input name='token' placeholder='token'>"
+                            "<button>Open</button></form>", status=401, mimetype="text/html")
+        return None
+
+    # -------------------------------------------------------------- pages
+    def asset_version():
+        """The program version and the newest change to a page file, so a
+        browser never keeps an old script after an update of the same version."""
+        sd = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+        try:
+            t = max(os.path.getmtime(os.path.join(sd, f)) for f in os.listdir(sd) if f.endswith((".js", ".css")))
+        except (OSError, ValueError):
+            t = 0
+        return f"{__version__}.{int(t)}"
+
+    @app.get("/")
+    def index():
+        owner()
+        return render_template("index.html", version=asset_version(), ai=app.config.get("AIMPSIM"))
+
+    @app.get("/healthz")
+    def healthz():
+        return "ok"
+
+    @app.get("/favicon.ico")
+    def favicon():
+        return Response(status=204)
+
+    @app.get("/api/health")
+    def api_health():
+        return jsonify({"version": __version__, "versions": app.versions,
+                        "cores": os.cpu_count(), "concurrency": app.queue.concurrency,
+                        "limits": app.config["LIMITS"],
+                        "queued": sum(1 for j in app.queue.jobs.values() if j.state == "queued"),
+                        "running": len(app.queue.running())})
+
+    @app.get("/api/materials")
+    def api_materials():
+        return jsonify(M.load_library())
+
+    @app.get("/api/presets")
+    def api_presets():
+        with open(PRESETS, encoding="utf-8") as fh:
+            return jsonify(json.load(fh))
+
+    @app.get("/api/analyses")
+    def api_analyses():
+        return jsonify(S.ANALYSES)
+
+    def run_tags(spec, plan=None):
+        """What a run is, for the run list: structure only or which analyses,
+        the phases in one line, and the grid."""
+        def size(ph):
+            d = (ph.get("size_um") or {}).get("d")
+            if d is None:
+                return ""
+            return f" {d * 1000:.0f} nm" if d < 1 else f" {d:.3g} µm"
+        phases = " + ".join(f"{ph.get('name', '')} {ph.get('shape', '')}{size(ph)} {100 * float(ph.get('vf', 0)):.3g} %"
+                            for ph in spec.get("phases") or [])
+        mat = (spec.get("matrix") or {}).get("name", "")
+        tags = {"kind": "structure" if (spec.get("preview") or not spec.get("analyses")) else "analysis",
+                "structure": (f"{phases} in {mat}" if phases else mat).strip()}
+        if plan:
+            n, nz = plan.get("N"), plan.get("Nz") if plan.get("film") else None
+            if n:
+                tags["grid"] = f"{n}³" if not nz else f"{n}×{n}×{nz}"
+        return tags
+
+    def est_mem_gb(form):
+        """The planner's peak-memory estimate for a run, kept with the job so
+        the queue can hold parallel runs inside the machine's RAM."""
+        try:
+            spec = S.normalize(copy.deepcopy(form))
+            from mpsim.pipeline import _plan_phases
+            plan = R.plan(_plan_phases(spec), dict(spec["rve"], contacts=spec["options"]["contacts"], particle_gap_vox=spec["options"].get("particle_gap_vox"), elastic_method=spec["options"]["elastic_method"]), needed_analyses(spec), app.config["LIMITS"])
+            est_mem_gb.last_plan = plan
+            mem = plan.get("memory_gb") or {"-": 0.0}
+            # the structure phase: the generator's arrays, and for the
+            # arrangement after compression the creeping-flow solves that
+            # build it (voxel FE, like elasticity)
+            n = plan["N"] * plan["N"] * (plan["Nz"] if plan.get("film") else plan["N"])
+            st = float(mem.get("structure") or 0.0)
+            if spec["rve"].get("arrangement") == "pressed":
+                st += n * R.FANS_BYTES / 1e9
+            est_mem_gb.last_struct = round(st, 3)
+            return round(max(mem.values()), 3)
+        except Exception:                                   # noqa: BLE001
+            est_mem_gb.last_plan = None
+            est_mem_gb.last_struct = None
+            return 0.0
+
+    app.queue.estimator = est_mem_gb
+
+    def plan_form(form):
+        """The plan of a form as the Domain tab shows it: (plan, spec,
+        warnings); raises ValueError when the structure itself is invalid."""
+        form = copy.deepcopy(form)
+        an = form.get("analyses") or {}
+        if not any(an.values()):
+            form["analyses"] = {"thermal": True}
+        warnings = []
+        try:
+            spec = S.normalize(form)
+        except ValueError as e:
+            errs = str(e).split("\n")
+            alone = copy.deepcopy(form)
+            alone["analyses"] = {"thermal": True}
+            spec = S.normalize(alone)
+            warnings = errs
+        from mpsim.pipeline import _plan_phases
+        pph = _plan_phases(spec)
+        rv = dict(spec["rve"], contacts=spec["options"]["contacts"], particle_gap_vox=spec["options"].get("particle_gap_vox"),
+                  elastic_method=spec["options"]["elastic_method"])
+        return R.plan(pph, rv, needed_analyses(spec), app.config["LIMITS"]), spec, warnings
+
+    app.plan_form = plan_form
+
+    @app.post("/api/plan")
+    def api_plan():
+        form = copy.deepcopy(request.get_json(force=True, silent=True) or {})
+        an = form.get("analyses") or {}
+        if not any(an.values()):
+            form["analyses"] = {"thermal": True}
+        warnings = []
+        try:
+            spec = S.normalize(form)
+        except ValueError as e:
+            # analyses that cannot run with this structure (permeability
+            # without pores, moisture without the matrix's D_w, ...) do not
+            # hide the plan of the structure itself: it is planned for the
+            # structure alone and the reasons come back as warnings; a run
+            # with those analyses is still refused when it is submitted
+            errs = str(e).split("\n")
+            alone = copy.deepcopy(form)
+            alone["analyses"] = {"thermal": True}
+            try:
+                spec = S.normalize(alone)
+            except ValueError:
+                return jsonify({"ok": False, "errors": errs})
+            warnings = errs
+        from mpsim.pipeline import _plan_phases
+        pph = _plan_phases(spec)
+        rv = dict(spec["rve"], contacts=spec["options"]["contacts"], particle_gap_vox=spec["options"].get("particle_gap_vox"),
+                  elastic_method=spec["options"]["elastic_method"])
+        need = needed_analyses(spec)
+        plan = R.plan(pph, rv, need, app.config["LIMITS"])
+        try:
+            from mpsim import overlap_share as OS
+            plan["overlap_share"] = OS.auto_share(spec, plan)
+        except Exception as e:                                       # noqa: BLE001
+            plan["overlap_share"] = {"pct": None, "text": f"not available ({type(e).__name__}: {e})"}
+        return jsonify({"ok": True, "plan": plan, "composition": spec.get("composition"),
+                        "warnings": warnings,
+                        "labels": [{"name": t["name"], "kind": t["kind"]} for t in spec["labels"]],
+                        "phases": [{"name": p["name"], "vf": p["vf"], "d_um": p["size_um"].get("d"),
+                                    "dist": _dist_summary(p)} for p in spec["phases"]]})
+
+    def _dist_summary(p):
+        """What a phase's size distribution draws, for the preview in the
+        Structure tab (number mean, volume D10/D50/D90, densities)."""
+        if p["shape"] == "network" or (p.get("dist") or {}).get("type") not in ("lognormal", "normal", "table"):
+            return None
+        from mpsim import geometry as G
+        try:
+            return G.dist_summary(p["size_um"]["d"], p["dist"])
+        except Exception:                                    # noqa: BLE001
+            return None
+
+    # --------------------------------------------------------------- jobs
+    def _settings():
+        lim = app.config["LIMITS"]
+        return dict(app.queue.settings(), max_voxels=lim.get("N_max"), max_voxels_elastic=lim.get("N_max_elastic"),
+                    max_voxels_flow=lim.get("N_max_flow"))
+
+    @app.get("/api/settings")
+    def api_settings_get():
+        return jsonify(_settings())
+
+    @app.post("/api/settings")
+    def api_settings_set():
+        """How many analyses run at once, and how many cores each one uses.
+
+        The right answer depends on the machine and on the work: many small
+        cases finish sooner side by side, one large case wants every core. Only
+        the person at the keyboard knows which it is, so it is set here rather
+        than fixed at start-up.
+        """
+        b = request.get_json(force=True, silent=True) or {}
+        app.queue.configure(concurrency=b.get("concurrency"), threads=b.get("threads"),
+                            mem_budget_gb=b.get("mem_budget_gb"))
+        if "max_voxels" in b:
+            # the largest grid edge for every solver; empty returns to 500, 0 = no limit
+            v = b.get("max_voxels")
+            n = R.DEFAULT_LIMITS["N_max"] if v is None or (isinstance(v, (int, float)) and v < 0) else int(v)
+            app.config["LIMITS"].update(N_max=n, N_max_elastic=n, N_max_flow=n)
+            st = load_settings()
+            st["max_voxels"] = n
+            save_settings(st)
+        return jsonify(_settings())
+
+    def find_reuse(spec, prefer=None):
+        """The finished run of this case whose structure a new submission can
+        use, and whether the submission can simply continue it.
+
+        A run keeps the structure it generated (pipeline.save_structure). The
+        same geometry, grid, contact handling and seed make the same key; the
+        run then continues when nothing else differs either (the same
+        materials and options, more analyses) or when it holds no analysis yet
+        (a "Generate structure" run). Otherwise a new run is made that reuses
+        the structure. The run the user has open is preferred."""
+        if not spec["options"].get("reuse_runs", True):
+            return None, False
+        from mpsim import pipeline as P
+        try:
+            need = S.required_analyses(set(spec["analyses"]))
+            plan = R.plan(P._plan_phases(spec), dict(spec["rve"], contacts=spec["options"]["contacts"], particle_gap_vox=spec["options"].get("particle_gap_vox"), elastic_method=spec["options"]["elastic_method"]), need,
+                          app.config["LIMITS"])
+            plan["skin"] = P.film_skin(spec, plan) if plan.get("film") else None
+            key = P.structure_key(P._generator_phases(spec), plan, P.contacts_key(spec["options"]),
+                                  spec["rve"]["seed"], P.wants_contact_faces(spec), sheared=P.shear_key(spec),
+                                  dispersion=spec["rve"].get("dispersion"))
+        except Exception:                                            # noqa: BLE001
+            return None, False
+        case = app.config.get("CASE") or ""
+        cands = [j for j in app.queue.for_owner(owner_or_none(), limit=100000, folder=app.config["RUNS_DIR"],
+                                                everyone=not shared())
+                 if j.case == case and j.state == "done" and not (j.meta or {}).get("doe")
+                 and os.path.exists(os.path.join(j.out_dir, "structure", key + ".npz"))]
+        if not cands:
+            return None, False
+        cands.sort(key=lambda j: (j.id != prefer, -j.created))
+        sig = P.run_signature(spec)
+        for j in cands:
+            summ = j.summary or {}
+            if summ.get("preview") or not (j.meta or {}).get("analyses"):
+                return j, True
+            # the inputs as that run normalised them (what pipeline.run
+            # compares against): after a version that adds options, a run no
+            # longer matches and a new one is made, keeping the old results
+            try:
+                with open(os.path.join(j.out_dir, "spec.normalized.json"), encoding="utf-8") as fh:
+                    old = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if P.run_signature(old) == sig:
+                return j, True
+        return cands[0], False
+
+    @app.post("/api/jobs")
+    def api_submit():
+        form = request.get_json(force=True, silent=True) or {}
+        prefer = form.pop("_continue", None)
+        try:
+            spec = S.normalize(copy.deepcopy(form))
+        except ValueError as e:
+            return jsonify({"ok": False, "errors": str(e).split("\n")}), 400
+        form["_limits"] = app.config["LIMITS"]
+        meta = {"name": spec["name"], "analyses": spec["analyses"], "mem_gb": est_mem_gb(form),
+                "mem_struct_gb": est_mem_gb.last_struct, "gated": True}
+        meta.update(run_tags(spec, getattr(est_mem_gb, "last_plan", None)))
+        src, append = find_reuse(spec, prefer)
+        info = {}
+        if src is not None and append:
+            old = [a for a in ((src.meta or {}).get("analyses") or [])]
+            meta["analyses"] = sorted(set(old) | set(spec["analyses"]))
+            meta["kind"] = "analysis" if meta["analyses"] else "structure"
+            form["_reuse"] = {"append": True}
+            job = app.queue.submit(owner_or_none(), form, case_dir(), meta, folder=app.config["RUNS_DIR"],
+                                   case=app.config.get("CASE") or "", into=src.out_dir, replaces=src.id)
+            info = {"continued": src.id, "kept": old}
+        else:
+            if src is not None:
+                form["_reuse"] = {"from": [src.out_dir]}
+                info = {"structure_from": src.id}
+            job = app.queue.submit(owner_or_none(), form, case_dir(), meta,
+                                   folder=app.config["RUNS_DIR"], case=app.config.get("CASE") or "")
+        return jsonify({"ok": True, "id": job.id, **info})
+
+    @app.get("/api/workfolder")
+    def api_wf_get():
+        return jsonify(wf_info())
+
+    @app.get("/api/workspace")
+    def api_ws_get():
+        return jsonify(ws_info())
+
+    @app.post("/api/workspace")
+    def api_ws_set():
+        """Change the workspace (the root of all work folders); kept for the
+        next start. Runs in flight are not touched."""
+        b = request.get_json(force=True, silent=True) or {}
+        try:
+            ws_use(b.get("path"), create=bool(b.get("create", True)))
+        except (ValueError, OSError) as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": True, **ws_info(), "workfolder": wf_info()})
+
+    @app.post("/api/workfolder")
+    def api_wf_set():
+        """Open a work folder, making it the one new runs are written to.
+
+        Runs already in flight are not touched - they finish into the folder
+        they were started in. Only the list the browser shows changes.
+        """
+        b = request.get_json(force=True, silent=True) or {}
+        try:
+            wf_use(b.get("path"), create=bool(b.get("create", True)))
+        except (ValueError, OSError) as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": True, **wf_info()})
+
+    @app.get("/api/case")
+    def api_case_get():
+        return jsonify(case_info())
+
+    @app.post("/api/case")
+    def api_case_set():
+        """Open, or create, a case inside the current work folder. New runs are
+        written under it; runs already in flight are not moved."""
+        b = request.get_json(force=True, silent=True) or {}
+        try:
+            case_use(b.get("name"), create=bool(b.get("create", True)))
+        except (ValueError, OSError) as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": True, **case_info()})
+
+    @app.get("/api/jobs")
+    def api_list():
+        me = owner()
+        rows = []
+        cur = os.path.normcase(os.path.abspath(app.config["RUNS_DIR"]))
+        for j in app.queue.for_owner(me, limit=2000, folders=ws_folders() + [app.config["RUNS_DIR"]],
+                                     everyone=not shared()):
+            if "kind" not in j.meta:
+                # a run from before the tags: read them from its input once
+                try:
+                    with open(os.path.join(j.out_dir, "spec.normalized.json"), encoding="utf-8") as fh:
+                        sp = json.load(fh)
+                    pl = None
+                    try:
+                        with open(os.path.join(j.out_dir, "result.json"), encoding="utf-8") as fh:
+                            pl = json.load(fh).get("plan")
+                    except (OSError, ValueError):
+                        pass
+                    j.meta.update(run_tags(sp, pl))
+                except (OSError, ValueError):
+                    j.meta["kind"] = "analysis" if j.meta.get("analyses") else "structure"
+            rows.append({"id": j.id, "state": j.state, "name": j.meta.get("name"),
+                         "kind": j.meta.get("kind"), "structure": j.meta.get("structure"),
+                         "grid": j.meta.get("grid"), "doe_label": j.meta.get("doe_label"),
+                         # the case folder this run lives in, so the list can be
+                         # grouped the way the directory tree is
+                         "case": j.case,
+                         # and its work folder: the open one first, the others below
+                         "folder": os.path.basename((j.folder or "").rstrip("\\/")),
+                         "in_current": os.path.normcase(os.path.abspath(j.folder or "")) == cur,
+                         # the study a DOE case belongs to, so the run list can
+                         # fold a study into one entry instead of 64 loose rows
+                         "doe": j.meta.get("doe"),
+                         "analyses": j.meta.get("analyses"), "created": j.created,
+                         "progress": j.progress, "stage": j.stage,
+                         "elapsed_s": ((j.ended or time.time()) - j.started) if j.started else 0,
+                         "headline": (j.summary or {}).get("headline") if j.state == "done" else None,
+                         "queue_position": app.queue.position(j) if j.state == "queued" else 0,
+                         # why a queued run waits (a free place, or memory), or
+                         # a running one with its structure built (memory to solve)
+                         "wait": (app.queue.wait_reason(j) if j.state == "queued"
+                                  else app.queue.gate_reason(j) if j.state == "running" else ""),
+                         "phase": j.phase if j.state == "running" else None,
+                         "threads": j.threads if j.state == "running" else None})
+        return jsonify(rows)
+
+    @app.get("/api/jobs/<jid>")
+    def api_job(jid):
+        return jsonify(job_or_404(jid).snapshot())
+
+    @app.get("/api/jobs/<jid>/events")
+    def api_events(jid):
+        job = job_or_404(jid)
+        after = int(request.args.get("after", 0))
+        ev = job.since(after)[-800:]
+        return jsonify({"seq": job.seq, "state": job.state, "progress": job.progress,
+                        "stage": job.stage, "stage_detail": job.stage_detail, "solver": job.solver,
+                        "queue_position": app.queue.position(job) if job.state == "queued" else 0,
+                        "wait": app.queue.wait_reason(job) if job.state == "queued" else "",
+                        "elapsed_s": ((job.ended or time.time()) - job.started) if job.started else 0,
+                        "events": [{"seq": s, "kind": k, "data": p} for s, k, p in ev
+                                   if k in ("line", "stage", "partial", "finished", "state", "figure",
+                                            "partial_result")],
+                        "history": {k: v[-400:] for k, v in job.history.items()}})
+
+    # psutil handles of the runs' processes, kept between calls: a process's
+    # CPU share is measured from one call to the next
+    _ps = {}
+
+    @app.get("/api/jobs/<jid>/proc")
+    def api_proc(jid):
+        """Whether a run's process is alive and working (the Terminal tab):
+        its process tree's CPU use (100 % = one core), memory, processes and
+        threads, the seconds since it last reported anything, its stage and
+        the solver iteration it is at."""
+        job = job_or_404(jid)
+        now = time.time()
+        out = {"state": job.state, "phase": job.phase, "cores": job.threads, "alive": False,
+               "stage": job.stage, "detail": job.stage_detail, "solver": job.solver,
+               "since_s": (now - (job.last_t or job.started or now)) if job.state == "running" else None,
+               "elapsed_s": ((job.ended or now) - job.started) if job.started else 0.0}
+        p = job.proc
+        if job.state == "running" and p is not None and getattr(p, "pid", None):
+            try:
+                import psutil
+                root = _ps.get(p.pid)
+                if root is None or not root.is_running():
+                    root = _ps[p.pid] = psutil.Process(p.pid)
+                procs = [root] + root.children(recursive=True)
+                cpu = rss = thr = 0.0
+                for q in procs:
+                    h = _ps.get(q.pid)
+                    if h is None or not h.is_running():
+                        h = _ps[q.pid] = q
+                    try:
+                        cpu += h.cpu_percent(None)
+                        rss += h.memory_info().rss
+                        thr += h.num_threads()
+                    except psutil.Error:
+                        pass
+                out.update(alive=True, pid=p.pid, cpu_pct=cpu, rss_gb=rss / 1e9, n_procs=len(procs),
+                           n_threads=int(thr), cpus=psutil.cpu_count(), mem_free_gb=psutil.virtual_memory().available / 1e9)
+            except Exception as e:                                   # noqa: BLE001
+                out["error"] = f"{type(e).__name__}: {e}"
+            if len(_ps) > 400:
+                for k in [k for k, h in _ps.items() if not h.is_running()]:
+                    _ps.pop(k, None)
+        return jsonify(out)
+
+    @app.post("/api/jobs/<jid>/stop")
+    def api_stop(jid):
+        return jsonify({"ok": app.queue.stop(job_or_404(jid))})
+
+    @app.post("/api/jobs/<jid>/restart")
+    def api_restart(jid):
+        """Start a stopped (or failed) run again: its own inputs, in its own
+        folder, in its place in the list. A structure the run had finished is
+        kept in the folder (pipeline.save_structure, written before the
+        solves) and is used again, so a run stopped while solving goes
+        straight to the solves; the analyses start over, since a stop leaves
+        no half-finished solve to continue from. A DOE case stays its
+        study's case."""
+        job = job_or_404(jid)
+        if shared() and job.owner is not None and job.owner != owner():
+            abort(403, "Runs of other users cannot be started again")
+        if job.state not in ("stopped", "failed"):
+            abort(409, "Only a stopped or failed run can be started again")
+        try:
+            with open(os.path.join(job.out_dir, "spec.json"), encoding="utf-8") as fh:
+                form = json.load(fh)
+        except (OSError, ValueError):
+            abort(404, "The inputs of this run (spec.json) are missing")
+        try:
+            S.normalize(copy.deepcopy(form))
+        except ValueError as e:
+            return jsonify({"ok": False, "errors": str(e).split("\n")}), 400
+        form.setdefault("_limits", app.config["LIMITS"])
+        reuse = dict(form.get("_reuse") or {})
+        reuse["append"] = True              # analyses a failed run did finish are kept
+        form["_reuse"] = reuse
+        meta = dict(job.meta or {})
+        meta["restarts"] = int(meta.get("restarts") or 0) + 1
+        try:
+            os.remove(os.path.join(job.out_dir, STOPPED_FILE))
+        except OSError:
+            pass
+        try:
+            with open(os.path.join(job.out_dir, "run.log"), "a", encoding="utf-8") as fh:
+                fh.write(f"\n== Started again ({time.strftime('%Y-%m-%d %H:%M:%S')}), restart {meta['restarts']}\n")
+        except OSError:
+            pass
+        new = app.queue.submit(job.owner, form, os.path.dirname(job.out_dir), meta, folder=job.folder,
+                               case=job.case, into=job.out_dir, replaces=jid, rename=False)
+        if meta.get("doe"):
+            s = app.doe.get(meta["doe"])
+            if s is not None:
+                for c in s.get("cases") or []:
+                    if c.get("job_id") == jid:
+                        c["job_id"] = new.id
+                app.doe.save(s)
+        return jsonify({"ok": True, "id": new.id})
+
+    @app.post("/api/runs/open")
+    def api_runs_open():
+        """Runs kept on disk into the list: a run folder, or a work or case
+        folder holding runs - anywhere, e.g. copied from another PC. A work or
+        case folder joins the recent work folders, a single run the opened
+        runs; both stay listed after a restart."""
+        b = request.get_json(force=True, silent=True) or {}
+        p = (b.get("path") or "").strip().strip('"')
+        if not p or not os.path.isabs(p):
+            return jsonify({"ok": False, "error": "Give the folder as a full path, e.g. D:\\SimData\\MPSim\\2026-10-27"}), 400
+        p = os.path.abspath(p)
+        if not os.path.isdir(p):
+            return jsonify({"ok": False, "error": f"There is no folder at {p}"}), 400
+        st = wf_load()
+        if os.path.exists(os.path.join(p, "job.json")):
+            # a copy of a run listed already (the same id in another folder)
+            # gets an id of its own, so both are listed
+            try:
+                with open(os.path.join(p, "job.json"), encoding="utf-8") as fh:
+                    info = json.load(fh)
+                other = app.queue.get(info.get("id"))
+                if other is not None and os.path.normcase(os.path.abspath(other.out_dir)) != os.path.normcase(p):
+                    info["id"] = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
+                    with open(os.path.join(p, "job.json"), "w", encoding="utf-8") as fh:
+                        json.dump(info, fh, ensure_ascii=False)
+            except (OSError, ValueError):
+                pass
+            before = set(app.queue.jobs)
+            app.queue._restore_one(p, os.path.basename(p), os.path.dirname(p), "")
+            ids = [j for j in app.queue.jobs if j not in before]
+            if not ids:
+                # listed already: the run that lives there
+                ids = [j.id for j in app.queue.jobs.values()
+                       if os.path.normcase(os.path.abspath(j.out_dir)) == os.path.normcase(p)]
+            st["opened"] = [p] + [q for q in st["opened"] if os.path.normcase(q) != os.path.normcase(p)][:199]
+            wf_save(st)
+            return jsonify({"ok": True, "kind": "run", "ids": ids})
+        if not wf_count(p):
+            return jsonify({"ok": False, "error": f"No run was found in {p} (a run folder holds job.json)"}), 400
+        n = app.queue.restore(p)
+        st["recent"] = st["recent"][:1] + [p] + [q for q in st["recent"][1:]
+                                                if os.path.normcase(q) != os.path.normcase(p)]
+        st["recent"] = st["recent"][:12]
+        wf_save(st)
+        return jsonify({"ok": True, "kind": "folder", "added": n, "runs": wf_count(p),
+                        "folder": os.path.basename(p.rstrip("\\/"))})
+
+    @app.post("/api/runs/import")
+    def api_runs_import():
+        """A run saved as a ZIP (Export - Run folder ZIP, or the Complete ZIP)
+        unpacked into the open case as a run of its own. The Complete ZIP holds
+        the results, figures and report but not the 3D view; the run folder
+        ZIP holds everything."""
+        # a run with its 3D view and structure runs to hundreds of MB: the
+        # 8 MB limit of the other requests does not apply here
+        try:
+            request.max_content_length = 1 << 42          # None would fall back to the app limit
+        except AttributeError:
+            pass
+        f = request.files.get("file")
+        if f is None or not f.filename:
+            return jsonify({"ok": False, "error": "No file was sent"}), 400
+        stem = re.sub(r"[^\w.+-]+", "_", os.path.splitext(os.path.basename(f.filename))[0])[:60] or "imported"
+        dest_case = case_dir()
+        os.makedirs(dest_case, exist_ok=True)
+        out = None
+        for i in range(1, 1000):
+            cand = os.path.join(dest_case, stem if i == 1 else f"{stem}-{i:02d}")
+            try:
+                os.makedirs(cand, exist_ok=False)
+                out = cand
+                break
+            except FileExistsError:
+                continue
+        if out is None:
+            return jsonify({"ok": False, "error": "No free folder name for the run"}), 400
+        root = os.path.abspath(out)
+        try:
+            with zipfile.ZipFile(f.stream) as zf:
+                names = [n for n in zf.namelist() if not n.endswith("/")]
+                # a ZIP of the folder itself: one top folder around everything
+                tops = {n.split("/", 1)[0] for n in names}
+                strip = (tops.pop() + "/") if (len(tops) == 1 and names and all("/" in n for n in names)) else ""
+                for n in names:
+                    rel = n[len(strip):] if strip else n
+                    parts = rel.replace("\\", "/").split("/")
+                    if not rel or rel.startswith(("/", "\\")) or ".." in parts or ":" in rel:
+                        continue
+                    dst = os.path.abspath(os.path.join(out, *parts))
+                    if not dst.startswith(root + os.sep):
+                        continue
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    with zf.open(n) as src, open(dst, "wb") as fh:
+                        shutil.copyfileobj(src, fh)
+        except zipfile.BadZipFile:
+            shutil.rmtree(out, ignore_errors=True)
+            return jsonify({"ok": False, "error": "The file is not a ZIP archive"}), 400
+        if not os.path.exists(os.path.join(out, "result.json")) and not os.path.exists(os.path.join(out, "spec.json")):
+            shutil.rmtree(out, ignore_errors=True)
+            return jsonify({"ok": False, "error": "The ZIP holds no run (result.json or spec.json)"}), 400
+        # its job record: kept when it came along, made from the result when
+        # not; a new id when that id is listed already (imported twice)
+        info = {}
+        try:
+            with open(os.path.join(out, "job.json"), encoding="utf-8") as fh:
+                info = json.load(fh)
+        except (OSError, ValueError):
+            info = {}
+        if not info.get("id") or info.get("id") in app.queue.jobs:
+            res = {}
+            try:
+                with open(os.path.join(out, "result.json"), encoding="utf-8") as fh:
+                    res = json.load(fh)
+            except (OSError, ValueError):
+                pass
+            meta = dict(info.get("meta") or {})
+            meta.setdefault("name", res.get("name") or stem)
+            meta.setdefault("analyses", res.get("analyses") or [])
+            info = {"id": time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3), "owner": None, "meta": meta,
+                    "created": info.get("created") or time.time()}
+        info["dir"] = os.path.basename(out)
+        info["case"] = app.config.get("CASE") or ""
+        info["meta"] = dict(info.get("meta") or {}, imported=os.path.basename(f.filename))
+        with open(os.path.join(out, "job.json"), "w", encoding="utf-8") as fh:
+            json.dump(info, fh, ensure_ascii=False)
+        app.queue._restore_one(out, os.path.basename(out), os.path.abspath(app.config["RUNS_DIR"]),
+                               app.config.get("CASE") or "")
+        job = app.queue.get(info["id"])
+        return jsonify({"ok": True, "id": info["id"], "state": job.state if job else None,
+                        "view": os.path.exists(os.path.join(out, "view", "meta.json"))})
+
+    @app.delete("/api/jobs/<jid>")
+    def api_delete(jid):
+        job = job_or_404(jid)
+        # an ownerless run belongs to no one in particular - the command line,
+        # or a workspace copied in - so anyone who can see it may remove it
+        if shared() and job.owner is not None and job.owner != owner():
+            abort(403, "Runs of other users cannot be deleted")
+        if job.state in ("running", "queued"):
+            abort(409, "A running or queued run must be stopped first")
+        shutil.rmtree(job.out_dir, ignore_errors=True)
+        with app.queue.lock:
+            app.queue.jobs.pop(jid, None)
+            if jid in app.queue.order:
+                app.queue.order.remove(jid)
+        return jsonify({"ok": True})
+
+    @app.get("/api/jobs/<jid>/result")
+    def api_result(jid):
+        job = job_or_404(jid)
+        p = os.path.join(job.out_dir, "result.json")
+        if not os.path.exists(p) and request.args.get("partial"):
+            # the analyses finished so far, while the run goes on
+            p = os.path.join(job.out_dir, "result.partial.json")
+        if not os.path.exists(p):
+            abort(404, "No result is available yet")
+        return send_file(p, mimetype="application/json", max_age=0)
+
+    import threading
+    _upgrade_lock, _upgraded = threading.Lock(), set()
+
+    # the live frames of the solves going on (mpsim/live.py): the index of
+    # slots, then a slot's files; never cached, they change every second
+    @app.get("/api/jobs/<jid>/live")
+    def api_live_index(jid):
+        job = job_or_404(jid)
+        from mpsim import live as LIVE
+        return jsonify(LIVE.index(os.path.join(job.out_dir, "live")))
+
+    @app.get("/api/jobs/<jid>/live/<path:name>")
+    def api_live_file(jid, name):
+        job = job_or_404(jid)
+        p = safe_path(os.path.join(job.out_dir, "live"), name)
+        if not os.path.exists(p):
+            abort(404)
+        try:
+            with open(p, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            abort(404)
+        resp = Response(data, mimetype="application/octet-stream")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.get("/api/jobs/<jid>/view/<path:name>")
+    def api_view(jid, name):
+        job = job_or_404(jid)
+        view = os.path.join(job.out_dir, "view")
+        p = safe_path(view, name)
+        if not os.path.exists(p):
+            abort(404)
+        mt = "application/json" if name.endswith(".json") else "application/octet-stream"
+        if name == "meta.json" and job.state in ("done", "failed", "stopped") and jid not in _upgraded:
+            # an earlier run painted the particles with the resin's
+            # shear rate from inside the fillers (all zero): sampled again
+            # once from the resin side, out of the files the run kept
+            with _upgrade_lock:
+                if jid not in _upgraded:
+                    try:
+                        from mpsim import visual as VIS
+                        VIS.upgrade_matrix_fields(view)
+                    except Exception as e:                              # noqa: BLE001
+                        app.logger.warning("view of %s not upgraded: %s", jid, e)
+                    _upgraded.add(jid)
+        if name.endswith(".gz"):
+            # a gzip file is sent as such and the browser inflates it: the
+            # voxel volume crosses the network at a fraction of its size
+            resp = send_file(p, mimetype="application/octet-stream", max_age=3600, conditional=False)
+            resp.headers["Content-Encoding"] = "gzip"
+            return resp
+        # meta.json changes when a run is continued; the binaries carry its
+        # build stamp in their URL instead
+        return send_file(p, mimetype=mt, max_age=0 if name == "meta.json" else 3600)
+
+    def _view_meta(job):
+        with open(os.path.join(job.out_dir, "view", "meta.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    @app.get("/api/jobs/<jid>/fslice/<key>/<axis>/<int:k>")
+    def api_field_slice(jid, key, axis, k):
+        """One section of a field at the solver's resolution (float32, first
+        in-plane axis fastest), from the 16-bit copy the run kept."""
+        import numpy as np
+        from mpsim import visual as VIS
+        job = job_or_404(jid)
+        if axis not in ("x", "y", "z"):
+            abort(400)
+        try:
+            a = VIS.field_slice(os.path.join(job.out_dir, "view"), _view_meta(job), key, axis, k)
+        except (OSError, ValueError):
+            a = None
+        if a is None:
+            abort(404)
+        return Response(np.ascontiguousarray(a.T).astype("<f4").tobytes(), mimetype="application/octet-stream",
+                        headers={"Cache-Control": "max-age=3600"})
+
+    @app.get("/api/jobs/<jid>/vol8/<key>")
+    def api_field_volume(jid, key):
+        """A field on every voxel at 8 bits for the browser's voxel volume
+        (made once from the 16-bit copy, then kept)."""
+        from mpsim import visual as VIS
+        job = job_or_404(jid)
+        view = os.path.join(job.out_dir, "view")
+        try:
+            fn = VIS.field_volume8(view, _view_meta(job), key)
+        except (OSError, ValueError):
+            fn = None
+        if not fn:
+            abort(404)
+        resp = send_file(os.path.join(view, fn), mimetype="application/octet-stream", max_age=3600, conditional=False)
+        resp.headers["Content-Encoding"] = "gzip"
+        return resp
+
+    @app.get("/api/jobs/<jid>/lslice/<axis>/<int:k>")
+    def api_label_slice(jid, axis, k):
+        """One section of the structure at the solver's resolution (uint8,
+        first in-plane axis fastest), read from structure_labels.tif - the
+        browser volume is coarser than the solver's grid on a large RVE."""
+        import numpy as np
+        from mpsim import visual as VIS
+        job = job_or_404(jid)
+        if axis not in ("x", "y", "z"):
+            abort(400)
+        a = VIS.label_slice(os.path.join(job.out_dir, "view"), axis, k)
+        if a is None:
+            abort(404)
+        return Response(np.ascontiguousarray(a.T).tobytes(), mimetype="application/octet-stream",
+                        headers={"Cache-Control": "max-age=3600"})
+
+    @app.get("/api/jobs/<jid>/figures/<name>")
+    def api_figure(jid, name):
+        job = job_or_404(jid)
+        p = safe_path(os.path.join(job.out_dir, "figures"), name)
+        if not os.path.exists(p):
+            abort(404)
+        return send_file(p, mimetype="image/png", max_age=600)
+
+    @app.post("/api/jobs/<jid>/render")
+    def api_render(jid):
+        job = job_or_404(jid)
+        body = request.get_json(force=True, silent=True) or {}
+        kind = body.get("kind", "scene")
+        req = body.get("req") or {}
+        view = os.path.join(job.out_dir, "view")
+        if not os.path.exists(os.path.join(view, "meta.json")):
+            abort(404, "No visualisation data is available")
+        out = os.path.join(job.out_dir, "figures", f"export_{int(time.time()*1000)}.png")
+        try:
+            app.render.render("slice" if kind == "slice" else "scene", view, req, out)
+        except Exception as e:                                  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(e)[-2000:]}), 500
+        return send_file(out, mimetype="image/png", as_attachment=False, max_age=0)
+
+    # ---------------------------------------------------------- calibration
+    @app.post("/api/links/preview")
+    def api_links_preview():
+        """Check the links of a study's parameters or a calibration's unknowns
+        and give the range each linked entry takes over the factors' ranges
+        (every corner of the factor box and its centre), for the editor."""
+        import itertools as _it
+        from mpsim import doe as DOE
+        from mpsim import links as LK
+        b = request.get_json(force=True, silent=True) or {}
+        form = copy.deepcopy(b.get("form") or {})
+        factors = [f for f in (b.get("factors") or []) if f.get("path")]
+        if b.get("kind") == "cal":
+            from mpsim import calibrate as CAL
+
+            def allowed(path):
+                return None if CAL.unknown_kind(path) else (
+                    "only material values, interface resistances and particle surface parameters can follow an "
+                    "unknown (the structure of a sample stays as generated)")
+        else:
+            try:
+                known = {c["path"] for c in DOE.parameter_catalogue(form)}
+            except Exception:                                       # noqa: BLE001
+                known = set()
+
+            def allowed(path):
+                return None if path in known else "not an entry a study can set in this case"
+        errors = LK.check(factors, [f["path"] for f in factors], allowed)
+
+        def ends(f):
+            if f.get("values"):
+                v = [float(x) for x in f["values"]]
+                return min(v), max(v)
+            lo = float(f.get("min", f.get("lo", 0)) or 0)
+            hi = float(f.get("max", f.get("hi", 0)) or 0)
+            return min(lo, hi), max(lo, hi)
+        box = []
+        for f in factors:
+            try:
+                box.append(ends(f))
+            except (TypeError, ValueError):
+                box.append((0.0, 0.0))
+        mid = [(math.sqrt(a * c) if (f.get("scale") == "log" and a > 0 and c > 0) else 0.5 * (a + c))
+               for f, (a, c) in zip(factors, box)]
+        pts = [mid] + [list(c) for c in _it.product(*box)][:256]
+        syms = LK.symbols(len(factors))
+        out = []
+        for j, path, expr in LK.factor_links(factors):
+            try:
+                vals = [LK.evaluate(expr, dict(zip(syms, p_), x=p_[j])) for p_ in pts]
+                out.append({"factor": j, "path": path, "lo": min(vals), "hi": max(vals), "mid": vals[0]})
+            except LK.LinkError as e:
+                out.append({"factor": j, "path": path, "error": str(e)})
+        return jsonify({"errors": errors, "links": out})
+
+    @app.post("/api/calibration/theory")
+    def api_cal_theory():
+        """Theory values for the editor (mismatch-model interfacial
+        resistances) and, with measurements and unknowns, the effective-medium
+        preview: what these measurements can determine, before any solve."""
+        from mpsim import calibrate as CA
+        b = request.get_json(force=True, silent=True) or {}
+        out = {}
+        try:
+            out["theory"] = CA.theory(b.get("form") or b.get("base") or {})
+        except Exception as e:                                       # noqa: BLE001
+            out["theory_error"] = str(e)
+        if b.get("measurements") and b.get("unknowns"):
+            try:
+                out["preview"] = CA.preview(b)
+            except Exception as e:                                   # noqa: BLE001
+                out["preview_error"] = str(e)
+        return jsonify(out)
+
+    @app.post("/api/calibration")
+    def api_cal_submit():
+        from mpsim import calibrate as CA
+        job = request.get_json(force=True, silent=True) or {}
+        job["_kind"] = "calibration"
+        try:
+            CA._validate(job)
+            S.normalize(copy.deepcopy(CA.fill_props(job.get("base") or {})))
+        except ValueError as e:
+            return jsonify({"ok": False, "errors": str(e).split("\n")}), 400
+        job["_limits"] = app.config["LIMITS"]
+        # structures of earlier runs in this case are reused when they match
+        job["_structure_dirs"] = [j.out_dir for j in app.queue.for_owner(owner_or_none(), limit=200,
+                                                                          folder=app.config["RUNS_DIR"])
+                                  if j.state == "done" and os.path.isdir(os.path.join(j.out_dir, "structure"))]
+        names = ", ".join(u.get("label") or u.get("path") for u in job.get("unknowns") or [])
+        meta = {"name": job.get("name") or f"Calibration of {names}", "analyses": ["calibration"],
+                "kind": "calibration", "structure": f"{len(job['measurements'])} measurement(s) · {names}",
+                "mem_gb": 0.5}
+        jb = app.queue.submit(owner_or_none(), job, case_dir(), meta, folder=app.config["RUNS_DIR"],
+                              case=app.config.get("CASE") or "")
+        return jsonify({"ok": True, "id": jb.id})
+
+    # ---------------------------------------------------------- DOE studies
+    @app.post("/api/doe/parameters")
+    def api_doe_params():
+        from mpsim import doe as DOE
+        form = request.get_json(force=True, silent=True) or {}
+        return jsonify(DOE.parameter_catalogue(form))
+
+    @app.post("/api/doe")
+    def api_doe_create():
+        payload = request.get_json(force=True, silent=True) or {}
+        form = payload.get("form") or {}
+        form["_limits"] = app.config["LIMITS"]
+        payload["form"] = form
+        try:
+            study = app.doe.create(owner_or_none(), payload, app.queue, case_dir(), S.normalize,
+                                   folder=app.config["RUNS_DIR"], case_name=app.config.get("CASE") or "",
+                                   estimate=est_mem_gb, plan=lambda f: plan_form(f)[0])
+        except ValueError as e:
+            return jsonify({"ok": False, "errors": str(e).split("\n")}), 400
+        return jsonify({"ok": True, "id": study["id"], "n_cases": len(study["cases"])})
+
+    @app.get("/api/doe")
+    def api_doe_list():
+        me = owner()
+        out = []
+        for s in app.doe.all(me if shared() else None):
+            rows, _ = app.doe.rows(s, app.queue)
+            counts = {}
+            for r in rows:
+                counts[r["state"]] = counts.get(r["state"], 0) + 1
+            out.append({"id": s["id"], "name": s["name"], "created": s["created"], "design": s["design"],
+                        "n_cases": len(s["cases"]), "counts": counts})
+        return jsonify(out)
+
+    @app.get("/api/doe/<sid>")
+    def api_doe_get(sid):
+        s = app.doe.get(sid)
+        if s is None:
+            abort(404, "DOE study not found")
+        return jsonify(app.doe.summary(s, app.queue))
+
+    @app.get("/api/doe/<sid>/csv")
+    def api_doe_csv(sid):
+        s = app.doe.get(sid)
+        if s is None:
+            abort(404, "DOE study not found")
+        # the table as it stands, also while the study runs: the cases done so
+        # far with their values, the others with their state. The file name
+        # carries the time, so that snapshots taken during a study do not
+        # overwrite each other; send_file encodes a name outside Latin-1 (a
+        # study named after Al2O3 with subscripts closed the connection before)
+        data = app.doe.csv(s, app.queue).encode("utf-8-sig")
+        name = re.sub(r'[\\/:*?"<>|]+', "_", (s["name"] or sid))[:60].strip() or sid
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        return send_file(io.BytesIO(data), mimetype="text/csv", as_attachment=True,
+                         download_name=f"{name}_{stamp}.csv", max_age=0)
+
+    @app.post("/api/doe/<sid>/optimize")
+    def api_doe_optimize(sid):
+        """Key design factors, a surrogate of the study and its optimum."""
+        s = app.doe.get(sid)
+        if s is None:
+            abort(404, "DOE study not found")
+        body = request.get_json(force=True, silent=True) or {}
+        response = body.get("response")
+        if not response:
+            return jsonify({"ok": False, "error": "No response quantity was chosen"}), 400
+        rows, metrics = app.doe.rows(s, app.queue)
+        from mpsim import optimise as OPT
+        try:
+            out = OPT.analyse(s, rows, response, goal=body.get("goal") or "max",
+                              target=body.get("target"), seed=int(body.get("seed") or 0),
+                              options=body.get("options") or None)
+        except Exception as e:                                  # noqa: BLE001
+            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+        out["ok"] = True
+        out["metrics"] = metrics
+        out["study"] = {"id": s["id"], "name": s["name"], "design": s["design"]}
+        return jsonify(out)
+
+    @app.get("/api/doe/<sid>/kernels")
+    def api_doe_kernels(sid):
+        """The surrogate models that can be chosen, for the tuning step."""
+        from mpsim import optimise as OPT
+        return jsonify({"kernels": [{"id": k, "label": v[0]} for k, v in OPT.KERNELS.items()]})
+
+    @app.post("/api/doe/<sid>/pareto")
+    def api_doe_pareto(sid):
+        """Several objectives at once: the trade-off front (NSGA-II)."""
+        s = app.doe.get(sid)
+        if s is None:
+            abort(404, "DOE study not found")
+        body = request.get_json(force=True, silent=True) or {}
+        responses = body.get("responses") or []
+        goals = body.get("goals") or []
+        if len(responses) < 2:
+            return jsonify({"ok": False, "error": "Two or more responses are needed for a trade-off"}), 400
+        if len(goals) != len(responses):
+            goals = (goals + ["max"] * len(responses))[:len(responses)]
+        rows, metrics = app.doe.rows(s, app.queue)
+        from mpsim import optimise as OPT
+        try:
+            out = OPT.pareto(s, rows, responses, goals, targets=body.get("targets") or None,
+                             seed=int(body.get("seed") or 0), options=body.get("options") or None,
+                             pop=int(body.get("pop") or 64),
+                             generations=int(body.get("generations") or 60))
+        except Exception as e:                                  # noqa: BLE001
+            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+        out["ok"] = not out.get("error")
+        out["metrics"] = metrics
+        out["study"] = {"id": s["id"], "name": s["name"], "design": s["design"]}
+        return jsonify(out)
+
+    @app.post("/api/doe/<sid>/point")
+    def api_doe_point(sid):
+        """Queue one run at a chosen point: the verification of an optimum.
+
+        A predicted optimum is only a prediction; this runs the real solver
+        there so the prediction can be compared with a measurement.
+        """
+        import copy as _copy
+        s = app.doe.get(sid)
+        if s is None:
+            abort(404, "DOE study not found")
+        body = request.get_json(force=True, silent=True) or {}
+        values = body.get("values") or {}
+        if not values:
+            return jsonify({"ok": False, "error": "No parameter values were given"}), 400
+        from mpsim import doe as DOE
+        base = _copy.deepcopy(s["base_form"])
+        base["_limits"] = app.config["LIMITS"]
+        case = {"values": {k: float(v) for k, v in values.items()}, "label": body.get("label") or "optimum"}
+        try:
+            form = DOE.apply_case(base, case, parameters=s.get("parameters"))
+        except ValueError as e:
+            return jsonify({"ok": False, "errors": str(e).split("\n")}), 400
+        try:
+            S.normalize(_copy.deepcopy(form))
+        except ValueError as e:
+            return jsonify({"ok": False, "errors": str(e).split("\n")}), 400
+        meta = {"name": form["name"], "analyses": s.get("analyses") or [], "doe": sid,
+                "mem_gb": est_mem_gb(form), "mem_struct_gb": est_mem_gb.last_struct, "gated": True,
+                "doe_label": case["label"]}
+        job = app.queue.submit(owner_or_none(), form, case_dir(), meta,
+                               folder=app.config["RUNS_DIR"], case=app.config.get("CASE") or "")
+        return jsonify({"ok": True, "id": job.id, "name": form["name"]})
+
+    @app.post("/api/doe/<sid>/retry")
+    def api_doe_retry(sid):
+        """Queue again every case of a study whose run failed, was stopped or has
+        gone missing.
+
+        The design is kept; each such case is re-run with its own values and the
+        study is pointed at the new run, so the table, the surrogate and the
+        optimiser see it as if it had worked the first time. A retry lands next
+        to the run it replaces, in that run's case folder, rather than in
+        whatever case happens to be open.
+        """
+        import copy as _copy
+        s = app.doe.get(sid)
+        if s is None:
+            abort(404, "DOE study not found")
+        from mpsim import doe as DOE
+        done = []
+        for case in s["cases"]:
+            old = app.queue.get(case["job_id"])
+            if old is not None and old.state not in ("failed", "stopped"):
+                continue
+            form = DOE.apply_case(_copy.deepcopy(s["base_form"]), {"values": case["values"], "label": case["label"]},
+                                  parameters=s.get("parameters"))
+            form["_limits"] = app.config["LIMITS"]
+            meta = {"name": form["name"], "analyses": s.get("analyses") or [], "doe": sid,
+                    "mem_gb": est_mem_gb(form), "mem_struct_gb": est_mem_gb.last_struct, "gated": True,
+                    "doe_label": case["label"]}
+            if old is not None:
+                where, folder, cname = os.path.dirname(old.out_dir), old.folder, old.case
+            else:
+                where, folder, cname = case_dir(), app.config["RUNS_DIR"], app.config.get("CASE") or ""
+            job = app.queue.submit(owner_or_none(), form, where, meta, folder=folder, case=cname)
+            done.append({"label": case["label"], "old": case["job_id"], "new": job.id})
+            case["job_id"] = job.id
+        if done:
+            app.doe.save(s)
+        return jsonify({"ok": True, "requeued": len(done), "cases": done})
+
+    @app.post("/api/doe/<sid>/stop")
+    def api_doe_stop(sid):
+        """Stop a whole study: its queued cases first, then the running ones,
+        so that no queued case starts in the place a stopped one leaves."""
+        s = app.doe.get(sid)
+        if s is None:
+            abort(404, "DOE study not found")
+        jobs = [app.queue.get(c["job_id"]) for c in s["cases"]]
+        live = [j for j in jobs if j is not None and j.state in ("running", "queued")]
+        return jsonify({"ok": True, "stopped": app.queue.stop_many(live)})
+
+    @app.delete("/api/doe/<sid>")
+    def api_doe_delete(sid):
+        s = app.doe.get(sid)
+        if s is None:
+            abort(404, "DOE study not found")
+        if shared() and s.get("owner") not in (owner(), None):
+            abort(403, "DOE studies of other users cannot be deleted")
+        if request.args.get("runs") == "1":
+            jobs = [app.queue.get(c["job_id"]) for c in s["cases"]]
+            live = [j for j in jobs if j is not None and j.state in ("running", "queued")]
+            app.queue.stop_many(live)
+            # a stopped run ends within seconds (JobQueue.stop); its directory
+            # goes with the others once its process is gone
+            t0 = time.time()
+            while any(j.state == "running" for j in live) and time.time() - t0 < 10:
+                time.sleep(0.2)
+            for job in jobs:
+                if job is None or job.state == "running":
+                    continue
+                shutil.rmtree(job.out_dir, ignore_errors=True)
+                with app.queue.lock:
+                    app.queue.jobs.pop(job.id, None)
+                    if job.id in app.queue.order:
+                        app.queue.order.remove(job.id)
+        app.doe.delete(sid)
+        return jsonify({"ok": True})
+
+    @app.get("/api/jobs/<jid>/report")
+    def api_report(jid):
+        job = job_or_404(jid)
+        p = os.path.join(job.out_dir, "report.html")
+        if not os.path.exists(p):
+            abort(404, "No report is available yet")
+        return send_file(p, mimetype="text/html", max_age=0)
+
+    @app.get("/api/jobs/<jid>/input_report")
+    def api_input_report(jid):
+        """The inputs of a run as a short report: for a case still waiting in
+        the queue or running, what it will build and compute."""
+        job = job_or_404(jid)
+        from mpsim import report as RP
+        form = copy.deepcopy(job.spec or {})
+        try:
+            pl, spec, _ = plan_form(form)
+        except ValueError as e:
+            return Response(f"<p>The input of this run cannot be read: {html_escape(str(e))}</p>", mimetype="text/html")
+        try:
+            page = RP.input_html(spec, pl, job.meta if isinstance(job.meta, dict) else {}, STATE_WORDS.get(job.state, job.state),
+                                 job.created)
+        except Exception as e:                                       # noqa: BLE001
+            return Response(f"<p>The input report could not be made: {html_escape(str(e))}</p>", mimetype="text/html")
+        return Response(page, mimetype="text/html")
+
+    @app.get("/api/jobs/<jid>/download/<what>")
+    def api_download(jid, what):
+        job = job_or_404(jid)
+        d = job.out_dir
+        names = {"layer_card": "layer_card.json", "result": "result.json", "structure": "structure.tif",
+                 "structure_labels": "structure_labels.tif", "structure_legend": "structure_legend.csv",
+                 "report": "report.html", "spec": "spec.json"}
+        base = (job.meta.get("name") or job.id).replace("/", "_").replace("\\", "_")[:60]
+        if what in names:
+            p = os.path.join(d, names[what])
+            if not os.path.exists(p):
+                abort(404)
+            return send_file(p, as_attachment=True, download_name=f"{base}_{names[what]}")
+        if what == "structure_set":
+            # the three files another program needs to rebuild the same model
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for n in ("structure.tif", "structure_labels.tif", "structure_legend.csv"):
+                    p = os.path.join(d, n)
+                    if os.path.exists(p):
+                        zf.write(p, n)
+            buf.seek(0)
+            return send_file(buf, as_attachment=True, download_name=f"{base}_structure.zip",
+                             mimetype="application/zip")
+        if what == "run":
+            # the whole run folder (results, 3D view, structure, report), to
+            # open on another PC (Runs - Import ZIP); written to a temporary
+            # file, as a run with its view can be large
+            import tempfile
+            tmp = tempfile.TemporaryFile()
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+                for root, dirs, files in os.walk(d):
+                    if root == d:
+                        dirs[:] = [x for x in dirs if x not in ("_tmp", "live")]
+                    for n in files:
+                        if root == d and n == STOPPED_FILE:
+                            continue
+                        full = os.path.join(root, n)
+                        zf.write(full, os.path.relpath(full, d).replace(os.sep, "/"))
+            tmp.seek(0)
+            return send_file(tmp, as_attachment=True, download_name=f"{base}_run.zip", mimetype="application/zip")
+        if what == "bundle":
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for n in ("result.json", "layer_card.json", "spec.json", "spec.normalized.json",
+                          "structure.tif", "structure_labels.tif", "structure_legend.csv", "report.html", "run.log"):
+                    p = os.path.join(d, n)
+                    if os.path.exists(p):
+                        zf.write(p, n)
+                figs = os.path.join(d, "figures")
+                if os.path.isdir(figs):
+                    for n in os.listdir(figs):
+                        zf.write(os.path.join(figs, n), f"figures/{n}")
+            buf.seek(0)
+            return send_file(buf, as_attachment=True, download_name=f"{base}_bundle.zip",
+                             mimetype="application/zip")
+        abort(404)
+
+    @app.errorhandler(400)
+    @app.errorhandler(403)
+    @app.errorhandler(404)
+    @app.errorhandler(409)
+    def _err(e):
+        if request.path.startswith("/api/"):
+            return jsonify({"ok": False, "error": getattr(e, "description", str(e))}), e.code
+        return e
+
+    _load_aimpsim(app, plan_form)
+    return app
+
+
+def _load_aimpsim(app, plan_form):
+    """AIMPSim (requests in words, a separate project used with the latest
+    MPSim) as the AI tab: imported when installed, or found in MPSIM_AI_PATH,
+    in an AIMPSim folder inside this MPSim folder or beside it. MPSim works
+    as before without it; the tab then says how to add it."""
+    import importlib
+    app.config["AIMPSIM"] = None
+    mod = None
+    try:
+        mod = importlib.import_module("aimpsim")
+    except ImportError:
+        base = os.path.dirname(ROOT)
+        for p in (os.environ.get("MPSIM_AI_PATH"), os.path.join(base, "AIMPSim"),
+                  os.path.join(os.path.dirname(base), "AIMPSim")):
+            if p and os.path.isfile(os.path.join(p, "aimpsim", "__init__.py")):
+                sys.path.insert(0, p)
+                try:
+                    mod = importlib.import_module("aimpsim")
+                except Exception as e:                                # noqa: BLE001
+                    app.logger.warning("AIMPSim could not be loaded from %s: %s", p, e)
+                    mod = None
+                break
+    if mod is None:
+        return
+    from mpsim.calibrate import fill_props
+
+    def validate(form):
+        try:
+            S.normalize(fill_props(form))
+            return None
+        except ValueError as e:
+            return str(e)
+
+    def plan(form):
+        return plan_form(fill_props(form))[0]
+
+    try:
+        if hasattr(mod, "compatible") and not mod.compatible(__version__):
+            app.logger.warning("AIMPSim %s needs MPSim %s or later", getattr(mod, "__version__", "?"),
+                               getattr(mod, "MPSIM_MIN", "?"))
+        mod.register(app, {"library": M.load_library()["materials"], "validate": validate, "plan": plan,
+                           "cores": os.cpu_count() or 1, "version": __version__})
+    except Exception as e:                                            # noqa: BLE001
+        app.logger.warning("AIMPSim could not be registered: %s", e)
+        app.config["AIMPSIM"] = None

@@ -1,0 +1,39 @@
+/* AIMPSim - the AI tab (white workspace, as the rest of MPSim) */
+#c-ai{overflow:auto;background:#fff}
+.ai-wrap{max-width:980px;margin:0 auto;padding:18px 20px 40px}
+.ai-text{width:100%;box-sizing:border-box;resize:vertical;font:inherit;font-size:13px;line-height:1.5;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:#fff}
+.ai-text:focus{outline:2px solid #b7d3ff;border-color:#6aa5ff}
+.ai-rules>div{font-size:12px;line-height:1.5;color:#3b4250;margin:0 0 6px}
+.ai-msg{display:flex;margin:10px 0}
+.ai-user{justify-content:flex-end}
+.ai-bubble{max-width:72%;background:#eaf2ff;border:1px solid #cfe0ff;border-radius:10px 10px 2px 10px;padding:8px 12px;font-size:13px;line-height:1.5;white-space:pre-wrap}
+.ai-card{flex:1;border:1px solid var(--line);border-radius:8px;padding:12px 14px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.ai-card.bad{border-color:#f0b4b4;background:#fff6f6;color:#9a1c1c}
+.ai-card.ai-busy{color:#5b6372;font-size:13px}
+.ai-card.ai-note{font-size:13px;line-height:1.5;background:#f7fbf7;border-color:#cde6cd}
+.ai-head{font-weight:600;font-size:13px;margin-bottom:8px}
+.ai-sum{width:100%;border-collapse:collapse;font-size:13px}
+.ai-sum td{border-top:1px solid #eef0f3;padding:5px 6px;vertical-align:top}
+.ai-sum td:first-child{width:120px;color:#5b6372;white-space:nowrap}
+.ai-src{font-size:11px;color:#8250df;margin-top:2px}
+.ai-qs{margin-top:10px;border-top:1px solid #eef0f3;padding-top:8px}
+.ai-q{margin:8px 0}
+.ai-q.ess .ai-qt b{color:#9a4400}
+.ai-qt{font-size:13px;margin-bottom:5px}
+.ai-def{font-size:11px;color:#8a8f98;margin-left:8px}
+.ai-opts{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.ai-opt{border:1px solid #cfd6e0;background:#fff;border-radius:14px;padding:4px 11px;font-size:12px;cursor:pointer}
+.ai-opt:hover{border-color:#6aa5ff;background:#f3f8ff}
+.ai-opt.rec{border-color:#2f7de1;color:#0b62c4;font-weight:600}
+.ai-opt.on{background:#0b62c4;border-color:#0b62c4;color:#fff}
+.ai-free{display:inline-flex;gap:4px;align-items:center}
+.ai-free input{font:inherit;font-size:12px;padding:3px 8px;border:1px solid #cfd6e0;border-radius:6px;width:220px}
+.ai-actions{margin-top:12px}
+.ai-done{margin-top:8px}
+.ai-empty{padding:30px 6px}
+.ai-empty-t{display:flex;align-items:center;gap:8px;font-size:17px;font-weight:600;margin-bottom:6px}
+.ai-empty-t svg{width:22px;height:22px}
+.ai-ex{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}
+.ai-exb{text-align:left;border:1px solid var(--line);background:#fafbfc;border-radius:8px;padding:9px 11px;font-size:12.5px;line-height:1.45;cursor:pointer}
+.ai-exb:hover{border-color:#6aa5ff;background:#f3f8ff}
+@media (max-width:900px){.ai-ex{grid-template-columns:1fr}}
