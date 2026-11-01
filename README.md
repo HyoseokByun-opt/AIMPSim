@@ -6,8 +6,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.0-8250df" alt="version 0.3.0">
-  <a href="https://github.com/HyoseokByun-opt/MPSim"><img src="https://img.shields.io/badge/MPSim-5.6.4-0b62c4" alt="MPSim 5.6.4 inside"></a>
+  <img src="https://img.shields.io/badge/version-0.3.1-8250df" alt="version 0.3.1">
+  <a href="https://github.com/HyoseokByun-opt/MPSim"><img src="https://img.shields.io/badge/MPSim-5.6.5-0b62c4" alt="MPSim 5.6.5 inside"></a>
   <img src="https://img.shields.io/badge/local%20model-Qwen3.5--2B%20%C2%B7%20offline-6e40c9" alt="local model Qwen3.5-2B, offline">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-555555" alt="Windows 10 | 11 x64">
   <img src="https://img.shields.io/badge/license-MIT-2da44e" alt="MIT licence">
@@ -321,7 +321,7 @@ instead: `AIMPSim\GET_AI_MODEL.bat --model qwen3.5-4b` (`--list` shows the other
 ## Verification
 
 The AI tab is checked on the inputs it makes, not on the analyses (those are MPSim's, checked by its own self-test,
-`5_SELF_TEST.bat`, 89 problems with known solutions). Every request below has its answer written down; a reading is
+`5_SELF_TEST.bat`, 90 problems with known solutions). Every request below has its answer written down; a reading is
 right, asked (left open and asked - safe), or wrong (read as something else).
 
 **Requests as people write them** (`python AIMPSim/tests/freeform.py`, with `--llm <llama-server> <model>` for the
@@ -392,19 +392,22 @@ the stand-in; an optimum must be within 8 % of the range of the best point of a 
 | Silica, 0.45 and 0.8 W/m·K, R_int kept as asked | R_int alone fell short; switched to the filler and matrix conductivities | reached: silica 6.9 (the library's crystalline silica 6.5), epoxy 0.248, 36 s |
 | Silica, 3 and 5 W/m·K (out of reach) | asked; crystalline silica chosen by a click, calibrated, asked again; stopped by typing "멈춰" | stopped, 41 s |
 
-The user's design request above, run the same way (40 cases at Fast, each its own grid): most cases are built and
-solved in about a minute and a half, but the few near the packing limit of the 10 µm film (54-60 vol% of 2.4-3 µm
-alumina with few fines) creep for an hour or more in MPSim's packing, and a round waits for them. Once nothing else is
-queued, a round goes on without a few slow runs (they join the next one); while they hold every slot it waits. A
-faster packing near that limit is the next step.
+The user's design request above, run the same way (40 cases at Fast, each its own grid), ends by itself in 17-22 minutes
+with MPSim 5.6.5 (two runs): a case takes 48 s (median) and at most 10 minutes. With MPSim 5.6.4 the dense blends (54-60 vol% of
+2.4-3 µm alumina with fines) crept for an hour or more in the packing and the run did not end within four hours; MPSim
+5.6.5 packs spheres of different sizes largest first. After two rounds (46 cases, R² 0.974) the answer is that
+3 W/m·K is out of reach within 62 vol% for 0.2-3 µm alumina with R_int = R_c = 1E-8 m²K/W: the best run gave
+2.44 W/m·K, the surrogate's best 2.63 ± 0.07 W/m·K at 62 vol%. Six cases set to 59.6-61.8 vol% held 59.1-59.9 vol% -
+nearly equal sizes, or 3 µm particles with few fines, pack no further in the 10 µm film without overlap - and the
+answer says so instead of suggesting a higher content.
 
 ## Installation
 
-**PC without internet.** Download `AIMPSim-0.3.0-offline-win64.zip` from the
+**PC without internet.** Download `AIMPSim-0.3.1-offline-win64.zip` from the
 [latest release](https://github.com/HyoseokByun-opt/AIMPSim/releases/latest): MPSim with the AI tab, the model and its
 server, the Python runtime, every wheel and openEMS. Unzip to a short path such as `C:\AIMPSim`, run
 `1_INSTALL_OFFLINE.bat`, then `2_RUN_LOCAL.bat`. For the larger model, unzip
-`AIMPSim-0.3.0-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
+`AIMPSim-0.3.1-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
 
 **PC with internet and conda.**
 

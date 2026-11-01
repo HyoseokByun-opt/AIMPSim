@@ -545,6 +545,8 @@ def doe_design(params):
 # cross-validated R² is below WEAK_R2 does not choose the recipe - the lowest-content run that met the target does
 MARGIN_SD = 1.0
 WEAK_R2 = 0.7
+# vol%: a run whose structure holds this much less filler than it was set to has met the packing's limit
+SHORT_VOL = 0.5
 
 
 def _meets_sure(mean, std, tg):
@@ -590,7 +592,7 @@ def recommend(study, rows, spec, seed=0, n_combo=1500, ctx_out=None):
            "prefer": spec.get("prefer") or [], "tol": spec.get("tol") or TOL_DEFAULT}
 
     # the finished runs (those with every target's response): the realised content where the run says it
-    X, Y, used, short = [], [], [], []
+    X, Y, used, short, held = [], [], [], [], []
     for r in rows:
         if r.get("state") != "done":
             continue
@@ -603,6 +605,7 @@ def recommend(study, rows, spec, seed=0, n_combo=1500, ctx_out=None):
         real = met_.get("real_filler")
         if ci is not None and real is not None and np.isfinite(float(real)):
             short.append(xs[ci] - float(real))
+            held.append((xs[ci], float(real)))
             xs[ci] = float(real)
         X.append(xs)
         Y.append([float(v) for v in vs])
@@ -777,6 +780,16 @@ def recommend(study, rows, spec, seed=0, n_combo=1500, ctx_out=None):
         out["reached"] = False
         out["best"] = describe(j, x, best_at_max[j], sd_at_max[j], packing(x), b=hard)
         out["notes"].append("not_reached")
+        # runs set high that the structure could not hold (the packing stopped short, no overlap allowed): a
+        # higher content does not put more of such particles in - the user's 10 µm film of alumina, set to
+        # 59.6-61.8 vol%, held 59.1-59.9 vol%
+        lost = [(s_, r_) for s_, r_ in held if s_ - r_ > SHORT_VOL]
+        if lost:
+            out["held"] = {"n": len(lost), "set_min": round(min(s_ for s_, _ in lost), 1),
+                           "set_max": round(max(s_ for s_, _ in lost), 1),
+                           "held_min": round(min(r_ for _, r_ in lost), 1), "held_max": round(max(r_ for _, r_ in lost), 1)}
+            # read before the suggestion it changes
+            out["notes"].insert(out["notes"].index("not_reached"), "packing_limit")
     else:
         out["reached"] = True
         idx = np.where(feas)[0]
@@ -857,7 +870,7 @@ def recommend(study, rows, spec, seed=0, n_combo=1500, ctx_out=None):
         if out.get("recommended"):
             out["alternatives"] = [out["recommended"]] + list(out.get("alternatives") or [])[:3]
         out["recommended"], out["reached"] = run_rec, True
-        out["notes"] = [n for n in out["notes"] if n not in ("within_uncertainty", "not_reached")] + ["weak_surrogate"]
+        out["notes"] = [n for n in out["notes"] if n not in ("within_uncertainty", "not_reached", "packing_limit")] + ["weak_surrogate"]
     # the recipe to run once: the study's base case with the recommended values
     pick = out.get("recommended") or out.get("best")
     # the structures held a little less filler than asked (dense packings fall short): the content to ask

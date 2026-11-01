@@ -543,6 +543,24 @@ def test_design(lex, host, read=None):
         it = read(text) if read else parse(text, lex)
         if it.get("task") != task:
             errs.append(f"not a design: {text[:40]} -> {it.get('task')}")
+    # out of reach, and the structures held less than the cases were set to (the user's request in MPSim 5.6.5:
+    # cases set to 59.6-61.8 vol% held 59.1-59.9 vol% in the 10 µm film): the answer says so and does not
+    # suggest a higher content
+    p = planner.resolve(parse(DESIGN_TEXT, lex), {"_auto": True})["payload"]
+    if host.get("validate") and p and p.get("design"):
+        from mpsim import doe as DOE
+        from mpsim.calibrate import fill_props
+        base = fill_props(p["form"])
+        rows = []
+        for c in DOE.expand(p["doe"]["parameters"], p["doe"]["design"], p["doe"]["samples"], 1):
+            set_ = c["values"]["phases.0.fraction.value"]
+            real = min(set_, 59.6) - 0.1
+            rows.append({"state": "done", "values": c["values"], "label": c["label"], "job_id": "x",
+                         "metrics": {"k": 0.2 * (1 - real / 100.0) ** -2.5, "real_filler": real}})
+        out = DZ.recommend({"parameters": p["doe"]["parameters"], "base_form": base}, rows, p["design"])
+        hd = out.get("held") or {}
+        if out.get("reached") or "packing_limit" not in out.get("notes", []) or not hd.get("n") or hd.get("held_max", 99) > 59.6:
+            errs.append(f"design out of reach, packing short: reached={out.get('reached')} notes={out.get('notes')} held={hd}")
     # a follow-up changes the bound
     it = merge(parse(DESIGN_TEXT, lex), parse("최대 함량은 60vol%로 바꿔줘", lex))
     r = planner.resolve(it, {"_auto": True})

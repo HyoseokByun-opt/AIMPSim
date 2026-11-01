@@ -537,10 +537,14 @@
     const met = res.runs_met || [];
     rows.push([L("실제 해석", "Runs"), met.length ? esc(L("목표를 만족한 케이스 (함량 낮은 순): ", "cases that met the target, least filler first: ") + met.map((x) => `${fmt(x.content)}% → ${fmt(x.value)} ${u}`).join(", "))
       : esc(L(`목표를 만족한 케이스 없음 (최고 ${fmt((res.runs_best || {}).value)} ${u})`, `no case met the target (best ${fmt((res.runs_best || {}).value)} ${u})`))]);
+    const hd = res.held || {};
     const notes = (res.notes || []).map((n) => ({
+      packing_limit: L(`케이스 ${hd.n}개는 ${fmt(hd.set_min)}~${fmt(hd.set_max)} vol%로 설정했지만 구조에는 ${fmt(hd.held_min)}~${fmt(hd.held_max)} vol%만 들어갔습니다(겹침 없이 채울 수 있는 한계). 그 입자로는 최대 함량을 올려도 더 들어가지 않습니다.`,
+        `${hd.n} cases set to ${fmt(hd.set_min)}-${fmt(hd.set_max)} vol% held only ${fmt(hd.held_min)}-${fmt(hd.held_max)} vol% (as far as they pack without overlap): a higher content does not put more of those particles in.`),
       at_lower_bound: L("최저 함량이 범위의 아래 끝입니다. 더 낮은 함량에서도 될 수 있으니 범위를 넓혀 다시 보세요.", "The lowest content is at the lower end of the range; lower may work - widen the range."),
       within_uncertainty: L("예측이 불확도 안에서 목표에 걸쳐 있습니다. 확인 해석이 판단합니다.", "The prediction meets the target only within its uncertainty; the check run decides."),
-      not_reached: L("최대 함량을 올리거나 R 값·크기 범위를 다시 보세요.", "Raise the highest content or revisit the resistances and size range."),
+      not_reached: (res.notes || []).includes("packing_limit") ? L("R 값·크기 범위를 다시 보세요.", "Revisit the resistances and size range.")
+        : L("최대 함량을 올리거나 R 값·크기 범위를 다시 보세요.", "Raise the highest content or revisit the resistances and size range."),
       weak_surrogate: L("대리모델의 교차검증이 약해(R² < 0.7) 예측 대신 목표를 실제로 만족한 최저 함량 케이스를 추천합니다. 대리모델의 조합은 '다른 조합'에 남겨 둡니다.", "The surrogate cross-validates weakly (R² < 0.7): the recommended recipe is the run that met the target with the least filler, not a prediction; the surrogate's recipes are listed below."),
     }[n] || n)).map((x) => `<div class="note warn">${esc(x)}</div>`).join("");
     const alts = (res.alternatives || []).length ? `<div class="hint" style="margin-top:6px">${L("비슷한 함량의 다른 조합", "Other recipes of about the same content")}</div><table class="ai-sum">${
