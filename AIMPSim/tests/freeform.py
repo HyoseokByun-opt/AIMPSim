@@ -372,7 +372,9 @@ def grade(exp, it, r):
                 out[f"{key}{i}"] = "ok" if got == v else ("asked" if got is None else "wrong")
     for i, pv in (exp.get("props") or {}).items():
         slot = (it.get("matrix") or {}) if i == "m" else (fl[i] if i < len(fl) else {})
-        got = slot.get("props") or {}
+        # what the case gets: the model's values with the rules' reading of the sentence over them (planner)
+        got = dict(slot.get("props") or {})
+        got.update({x["prop"]: x["value"] for x in it.get("matprops") or [] if x.get("id") == slot.get("id") and "value" in x})
         out[f"props{i}"] = "ok" if all(abs((got.get(k) or -1e9) - v) < 1e-6 * max(1, v) for k, v in pv.items()) \
             and set(got) <= set(pv) else ("asked" if not got else "wrong")
     if "doe" in exp:

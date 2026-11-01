@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import re
 
-NUM = r"(\d+(?:\.\d+)?|\.\d+)"
+# 1E-8, 2.5e-9 and 1.5x10^-8 are one number (an interface resistance), not 1 and 8
+NUM = r"(\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|\.\d+)"
+_SCI = re.compile(r"(?<![A-Za-z\d.\-_])(\d+(?:\.\d+)?)\s*[x×*]\s*10\s*\^?\s*([-−+]?)\s*(\d+)(?![\d])")
 # basis-bearing percent units, longest first
 _VOL = (r"(?:vol(?:ume)?\.?\s*%|v\s*/\s*v\s*%?|%\s*\(?\s*(?:vol|v\s*/\s*v)\.?\s*\)?|vol(?:ume)?\.?\s*(?:percent|pct)"
         r"|부피\s*(?:%|퍼센트|프로|퍼)|체적\s*(?:%|퍼센트|프로|퍼)|vol%|vol\b|부피비|부피분율|체적분율|v%)")
@@ -40,6 +42,7 @@ UNITS = [
     ("W/mK", r"(?:w\s*/\s*\(?\s*m\s*[·.*]?\s*k\s*\)?|w/mk)"),
     ("S/cm", r"s\s*/\s*cm"), ("S/m", r"s\s*/\s*m"),
     ("ohm_m", r"(?:ohm|Ω|ω)\s*[·.*]?\s*m(?!m)"), ("ohm_cm", r"(?:ohm|Ω|ω)\s*[·.*]?\s*cm"),
+    ("m2K/W", r"(?:m\s*(?:2|²|\^\s*2)\s*[·.*]?\s*k\s*/\s*w|k\s*[·.*]?\s*m\s*(?:2|²|\^\s*2)\s*/\s*w)"),
     ("ppm/K", r"ppm\s*/\s*(?:k|°c|℃|c)\b|ppm"),
     ("GPa", r"gpa"), ("MPa", r"mpa(?!\s*[·.]?\s*s)"), ("Pa.s", r"(?:m?pa\s*[·.*]?\s*s|cps?|센티포아즈)"),
     ("C", r"(?:°\s*c|℃|도(?![가-힣]))"),
@@ -96,8 +99,14 @@ def quantities(text):
     Numbers inside names (SU-8, Al2O3, SAC305) are skipped."""
     out = []
     taken = 0
+    for m in _SCI.finditer(text):               # 1.5x10^-8: one number
+        v = float(m.group(1)) * 10.0 ** (float(m.group(3)) * (-1.0 if m.group(2) in ("-", "−") else 1.0))
+        unit, end = _unit_at(text, m.end())
+        out.append({"value": v, "unit": unit, "start": m.start(), "end": end, "form": None,
+                    "raw": text[m.start():end]})
+    sci = [(q["start"], q["end"]) for q in out]
     for m in _NUM_RE.finditer(text):
-        if m.start() < taken:
+        if m.start() < taken or any(a <= m.start() < b for a, b in sci):
             continue
         if m.group(2) and float(m.group(2)) > 12:
             m = _NUM_ONLY.match(text, m.start())   # "30/40": two levels; a fraction has a small denominator (1/3, 3/4)
@@ -139,11 +148,14 @@ def quantities(text):
                 pos, last_unit = e3, u3 or last_unit
                 if u3 is not None:
                     break
-            if len(vals) >= 3 or (len(vals) == 2 and last_unit is not None and unit is None):
+            # "20vol% 3.0, 40vol% 3.4": a value after a content, then the next content - not a list of contents
+            after_pct = unit is None and last_unit in ("vol", "wt", "pct") and re.search(r"%\s*$", text[max(0, q["start"] - 3):q["start"]])
+            if (len(vals) >= 3 or (len(vals) == 2 and last_unit is not None and unit is None)) and not after_pct:
                 q.update(levels=vals, unit=unit or last_unit, end=pos)
         q["raw"] = text[q["start"]:q["end"]]
         taken = q["end"]
         out.append(q)
+    out.sort(key=lambda q: q["start"])
     return out
 
 
@@ -161,6 +173,8 @@ def as_content(q):
         return v, "phr", "phr"
     if u is not None:
         return None
+    if 0.0 < v < 1e-3:
+        return None                 # 1E-8 is not a content (an interface resistance)
     if q.get("form") == "fraction":
         return 100.0 * v, None, "fraction"
     if 0.0 < v <= 1.0:

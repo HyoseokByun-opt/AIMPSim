@@ -14,8 +14,10 @@ phonetic.similarity; the aliases below are the spellings in use.
 # or common abbreviations (matched exactly, never fuzzily: "BN", "Ag").
 MATERIALS = {
     # ---- polymers (matrices) ----
-    "epoxy": {"ko": ["에폭시", "에폭시수지", "에폭시레진", "에폭시 수지", "이엠씨", "언더필수지", "몰딩컴파운드"],
-              "en": ["epoxy", "epoxy resin", "epoxide", "emc", "molding compound", "mould compound"], "formula": ["EP"]},
+    "epoxy": {"ko": ["에폭시", "에폭시수지", "에폭시레진", "에폭시 수지", "이엠씨", "언더필수지", "몰딩컴파운드", "언더필",
+                     "언더필레진"],
+              "en": ["epoxy", "epoxy resin", "epoxide", "emc", "molding compound", "mould compound", "underfill",
+                     "underfill resin"], "formula": ["EP"]},
     "bt": {"ko": ["비티레진", "비티수지", "비스말레이미드트리아진", "비스말레이미드"], "en": ["bt resin", "bismaleimide triazine",
            "bismaleimide-triazine", "bismaleimide"], "formula": ["BT"]},
     "polyimide": {"ko": ["폴리이미드", "피아이"], "en": ["polyimide"], "formula": ["PI"]},
@@ -210,8 +212,25 @@ SHAPES = {
 ROLE_FILLER = {"ko": ["필러", "충전재", "충진재", "입자", "분말", "파우더", "분체", "필러로", "첨가제", "강화재"],
                "en": ["filler", "fillers", "particle", "particles", "powder", "powders", "additive", "inclusion",
                       "inclusions", "reinforcement"]}
+# words of the work, never a material: a word ending in one of them next to a filler word is not asked about
+NOT_MATERIAL_KO = ("해석", "실험", "조건", "결과", "계산", "시뮬레이션", "측정", "평가", "방법", "문제", "사용", "경우", "수준",
+                   "기준", "데이터", "값", "목표", "설계", "배합", "공정", "점도", "패킹", "비율", "분포", "크기", "두께", "함량",
+                   # words that describe a particle: "가장 작은 입자", "굵은 입자"
+                   "작은", "큰", "굵은", "가는", "미세한", "얇은", "두꺼운", "긴", "짧은", "높은", "낮은", "좋은", "잘되는", "같은",
+                   # what the compound is made into: "실리콘 갭필러", "방열패드"
+                   "갭필러", "방열패드", "써멀패드", "방열시트")
+NOT_MATERIAL_EN = ("analysis", "simulation", "experiment", "condition", "result", "results", "previous", "earlier",
+                   "design", "target", "data", "value", "values", "level", "process", "least", "most", "smallest",
+                   "largest", "lowest", "highest", "minimum", "maximum", "topcut", "blend", "ratio", "size", "sizes",
+                   "loading", "content", "packing", "viscosity", "distribution", "substrate", "substrates", "gap", "pad",
+                   "pads", "sheet", "board", "package")
+# the classes of a blend of sizes ("대입자 20~70um과 소입자 0.5~5um"): never a material
+SIZE_CLASS_KO = ("대입자", "소입자", "중입자", "조대입자", "미세입자", "극미세입자", "대립자", "소립자", "미립자", "조립자",
+                 "대입경", "소입경", "큰입자", "작은입자", "굵은입자", "가는입자", "대분말", "소분말", "미분")
 ROLE_MATRIX = {"ko": ["레진", "수지", "매트릭스", "기지", "바인더", "고분자", "베이스", "모재"],
                "en": ["resin", "matrix", "binder", "polymer", "base", "host"]}
+# what a matrix is made into, written onto its name ("에폭시필름", "PI시트"): the material is the name
+MATRIX_FORM = {"ko": ["필름", "시트", "박막", "패드"], "en": []}
 
 TASKS = {
     "doe": {"ko": ["doe", "실험계획", "실험 계획", "바꿔가며", "바꿔가면서", "변화시키며", "변화시키면서", "변화에따른", "에따른",
@@ -247,8 +266,10 @@ DIRECTIONS = {
             "three directions", "3 directions", "xyz", "every direction", "anisotropy", "tensor"]},
 }
 ORIENTATION = {
-    "z": {"ko": ["수직배향", "두께방향배향", "z배향", "세워진"], "en": ["aligned along z", "vertically aligned", "z-aligned"]},
-    "xy": {"ko": ["수평배향", "면내배향", "누운", "평행배향", "적층배향"], "en": ["in-plane aligned", "lying flat", "horizontally aligned"]},
+    "z": {"ko": ["수직배향", "두께방향배향", "z배향", "세워진", "수직정렬", "수직 정렬", "수직으로 정렬", "수직으로 세워", "세워서",
+                 "z정렬", "z 정렬"], "en": ["aligned along z", "vertically aligned", "z-aligned", "aligned vertically"]},
+    "xy": {"ko": ["수평배향", "면내배향", "누운", "평행배향", "적층배향", "수평정렬", "수평 정렬", "면내정렬", "면내 정렬", "눕혀서"],
+           "en": ["in-plane aligned", "lying flat", "horizontally aligned", "aligned in plane", "aligned in-plane"]},
     "iso": {"ko": ["랜덤", "무작위", "등방", "무작위배향", "랜덤배향"], "en": ["random", "randomly oriented", "isotropic"]},
 }
 DISTRIBUTION = {"lognormal": {"ko": ["로그정규", "로그 정규", "로그노말", "입도분포"], "en": ["lognormal", "log-normal",
@@ -280,7 +301,7 @@ STOP = {"ko": ["해줘", "구해줘", "계산", "계산해줘", "해석", "해�
                "here", "where", "when", "which", "who", "why", "then", "than", "also", "only", "just", "more",
                "most", "less", "much", "many", "some", "any", "all", "each", "other", "another", "same", "such",
                "make", "made", "need", "needs", "give", "take", "keep", "start", "stop", "again", "last", "next",
-               "first", "second", "time", "times", "case", "cases", "result", "results", "value", "values",
+               "substrate", "substrates", "first", "second", "time", "times", "case", "cases", "result", "results", "value", "values",
                "good", "better", "best", "high", "higher", "low", "lower", "small", "large", "big", "long", "short",
                "new", "old", "same", "thing", "things", "something", "anything", "everything", "please", "thanks",
                "thank", "okay", "yes", "no", "not", "very", "really", "maybe", "about", "after", "before",

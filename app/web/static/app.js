@@ -3292,6 +3292,7 @@
       toast("The calibration has been queued. The console follows it; the result opens here when it is done.", 6000);
       attach(r.id, false);
       pollRuns();
+      return r.id;
     } catch (err) { toast("The calibration could not be started:\n" + err.message, 9000); }
   }
   function calApply() {
@@ -3783,11 +3784,12 @@
           const vVar = d.parameters.some((p) => p.path === "rve.voxel_um"), lVar = d.parameters.some((p) => p.path === "rve.L_um" || p.path === "rve.N");
           const dom = `<span data-live="doedom">${doeDomHtml()}</span>`;
           return `<label class="f">RVE edge of the cases</label><select data-doe="edge" ${lVar ? "disabled" : ""}>
-              <option value="fixed" ${d.edge !== "adaptive" ? "selected" : ""}>Fixed: the Domain's edge for every case (default)</option>
-              <option value="adaptive" ${d.edge === "adaptive" ? "selected" : ""}>Adaptive: each case's own edge at the Domain's accuracy level</option></select>
+              <option value="fixed" ${!["adaptive", "own"].includes(d.edge) ? "selected" : ""}>Fixed: the Domain's edge for every case (default)</option>
+              <option value="adaptive" ${d.edge === "adaptive" ? "selected" : ""}>Adaptive: each case's own edge at the Domain's accuracy level</option>
+              <option value="own" ${d.edge === "own" ? "selected" : ""}>Own grid: each case's edge and voxel at the Domain's accuracy level</option></select>
             <div class="hint">The Domain tab applies to every case as it is: <b>${dom}</b>; arrangement, dispersion and realisations as set there.
-              The voxel size stays the Domain's${vVar ? " — here it is a parameter of the study and takes its values" : " in every case; it changes only as a parameter of the study"}.
-              ${lVar ? "The edge is a parameter of the study and takes its values." : d.edge === "adaptive" ? "Each case's edge is planned for its own particles (a larger filler, a larger RVE), on that voxel size." : "So the cases differ only in the parameters varied."}</div>`;
+              ${vVar ? "The voxel size is a parameter of the study and takes its values." : d.edge === "own" ? "The voxel size is planned for each case's smallest particle, for studies that vary a particle size (a voxel planned for the base under-resolves the small ones)." : "The voxel size stays the Domain's in every case; it changes only as a parameter of the study."}
+              ${lVar ? "The edge is a parameter of the study and takes its values." : ["adaptive", "own"].includes(d.edge) ? "Each case's edge is planned for its own particles (a larger filler, a larger RVE)." : "So the cases differ only in the parameters varied."}</div>`;
         })()}
         <div class="note ${n > 64 ? "bad" : ""}">${n} case${n === 1 ? "" : "s"}${n > 64 ? " — at most 64 are accepted" : " will be queued"}. Each case is a complete run with its own result, figures and report.</div>
         <button class="btn primary" data-act="doeCreate" ${n < 1 || n > 64 ? "disabled" : ""}>${anyLive() ? `${I("plus")}Add the study to the queue` : `${I("play")}Create study and queue runs`}</button>
@@ -3803,7 +3805,7 @@
         links: (p.links || []).filter((l) => l.path).map((l) => ({ path: l.path, expr: (l.expr || "x").trim() || "x" })) })),
       form: clone(state.form),
     };
-    body.grid = { edge: d.edge === "adaptive" ? "adaptive" : "fixed" };
+    body.grid = { edge: ["adaptive", "own"].includes(d.edge) ? d.edge : "fixed" };
     const ahead = (state.jobs || []).filter((j) => ["running", "queued"].includes(j.state)).length;
     try {
       const res = await api("POST", "/api/doe", body);
@@ -3891,7 +3893,7 @@
     d.rows.forEach((r) => (counts[r.state] = (counts[r.state] || 0) + 1));
     const design = { full: "full factorial", oat: "one factor at a time", lhs: "Latin hypercube" }[d.design] || d.design;
     const g = d.grid || {};
-    const grid = g.edge ? `${g.film ? `thin film ${fmt(g.T_um)} µm · ` : ""}${g.edge === "adaptive" ? "edge adapted per case" : `edge ${fmt(g.L_um)} µm`} · voxel ${fmt(g.voxel_um)} µm (Domain)`
+    const grid = g.edge ? `${g.film ? `thin film ${fmt(g.T_um)} µm · ` : ""}${g.edge === "own" ? "edge and voxel planned per case" : `${g.edge === "adaptive" ? "edge adapted per case" : `edge ${fmt(g.L_um)} µm`} · voxel ${fmt(g.voxel_um)} µm (Domain)`}`
       : g.mode === "fixed" ? `fixed grid ${g.N}³ (${fmt(g.L_um)} µm, voxel ${fmt(g.voxel_um)} µm)` : `grid adaptive per case${g.quality ? ` (${g.quality})` : ""}`;
     $("#doeInfo").textContent = `${d.name} · ${d.n_cases} cases · ${design} · ${grid}`;
     const tile = (l, v, dd) => `<div class="tile"><div class="l">${l}</div><div class="v">${v}</div><div class="d">${dd || ""}</div></div>`;
@@ -4992,9 +4994,12 @@ ${live.length} case${live.length === 1 ? " is" : "s are"} still going and will b
     createDoe: () => doeCreate(),
     setCal(c) {
       const C = CAL(), cands = calCandidates();
+      // an unknown is a path (the tab's default range) or {path, lo, hi, scale, links} (a range of its own)
       const unk = (c.unknowns || []).map((p) => {
-        const k = cands.find((x) => x.path === p) || { path: p, label: p, unit: "", lo: 1e-9, hi: 1e-5, scale: "log" };
-        return { path: k.path, label: k.label, unit: k.unit, lo: k.lo, hi: k.hi, scale: k.scale, prior: "uniform", center: "", sigma_dec: 1, links: [] };
+        const q = typeof p === "string" ? { path: p } : p;
+        const k = cands.find((x) => x.path === q.path) || { path: q.path, label: q.path, unit: "", lo: 1e-9, hi: 1e-5, scale: "log" };
+        return { path: k.path, label: q.label || k.label, unit: q.unit || k.unit, lo: q.lo ?? k.lo, hi: q.hi ?? k.hi, scale: q.scale || k.scale,
+          prior: "uniform", center: "", sigma_dec: 1, links: clone(q.links || []) };
       });
       Object.assign(C, { name: c.name || "", measurements: clone(c.measurements || []), unknowns: unk, result: null, resultJob: null, preview: null });
       calSave();

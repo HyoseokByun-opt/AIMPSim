@@ -1492,6 +1492,24 @@ def create_app(workspace=None, token=None, concurrency=1, limits=None):
         out["study"] = {"id": s["id"], "name": s["name"], "design": s["design"]}
         return jsonify(out)
 
+    @app.post("/api/doe/<sid>/cases")
+    def api_doe_add_cases(sid):
+        """Further cases of a study at chosen points (the points an
+        optimisation wants run next): queued like its first cases, on its
+        grid, and fitted with them."""
+        s = app.doe.get(sid)
+        if s is None:
+            abort(404, "DOE study not found")
+        body = request.get_json(force=True, silent=True) or {}
+        try:
+            added = app.doe.add(s, body.get("cases") or [], app.queue, case_dir(), S.normalize,
+                                folder=app.config["RUNS_DIR"], case_name=app.config.get("CASE") or "",
+                                estimate=est_mem_gb, plan=lambda f: plan_form(f)[0], limits=app.config["LIMITS"],
+                                tag=str(body.get("label") or "added"))
+        except ValueError as e:
+            return jsonify({"ok": False, "errors": str(e).split("\n")}), 400
+        return jsonify({"ok": True, "added": len(added), "n_cases": len(s["cases"])})
+
     @app.post("/api/doe/<sid>/point")
     def api_doe_point(sid):
         """Queue one run at a chosen point: the verification of an optimum.

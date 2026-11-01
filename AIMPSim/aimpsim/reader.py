@@ -52,9 +52,9 @@ ANALYSIS_CUES = {
     "magnetic": r"자기|자성|투자|magnet|permeab|인덕|inductor|μ|\bmu\b",
     "emi": r"전자파|\bemi\b|차폐|shield|막",
     "cte": r"팽창|\bcte\b|탄성|강성|모듈|modul|stiff|딱딱|단단|hard|young|poisson|푸아송|expan|늘어|수축|shrink|\be\b|gpa|기계",
-    "mechtest": r"인장|압축|시험|\btest|\butm\b|하중|변위|\bload|displace|curve|곡선|파단|strength|강도",
+    "mechtest": r"인장|압축|시험|\btest|\butm\b|하중|변위|load[- ]?displacement|load\s+curve|\bdisplace|curve|곡선|파단|strength|강도",
     "thermomech": r"휨|휘|warp|\bbow|curv|응력|stress|뒤틀|굽",
-    "joule": r"줄\s*(?:발열|열)|joule|발열|뜨거|\bhot\b|가열|heating|전류",
+    "joule": r"줄\s*(?:발열|열)|joule|발열|뜨거|\bhot\b|가열|heating|heats?\s+up|warms?\s+up|전류",
     "viscosity": r"점도|흐르|흐름|흘러|\bflow|viscos|rheol|언더필|underfill|충전성",
     "moisture": r"흡습|수분|물을|물\s|습|moist|water|humid|swell|팽윤",
     "permeability": r"투과|permea|darcy|기체|\bgas\b",
@@ -68,10 +68,27 @@ ANALYSIS_CUES = {
     "pore_network": r"기공\s*네트워크|pore\s*network",
     "grains": r"입자\s*분석|구형도|grain|particle\s*analy|spheric",
 }
+# a shape needs a word that says it
+SHAPE_CUES = {"sphere": r"구형|구상|동그|둥근|spher|\bballs?\b|beads?|비드",
+              "platelet": r"판상|판\s*모양|판형|플레이크|flake|platelet|\bplates?\b|disc|disk|sheet|시트|그래핀|graphene|나노\s*판",
+              "fiber": r"섬유|fib(?:er|re)|whisker|휘스커|\brods?\b|막대|wire|와이어|tube|튜브|\bcnt\b|nanotube",
+              "irregular": r"불규칙|파쇄|각진|분쇄|irregular|angular|crushed",
+              "cube": r"큐브|정육면체|\bcub(?:e|ic)"}
 # an orientation needs a word that says it
-ORIENT_CUES = {"z": r"수직|세로|세워|vertical|through[- ]?(?:plane|thickness)|두께\s*방향|z\s*(?:방향|축|정렬|align)",
+# ("z방향 열전도도" is the direction of the property, not of the particles)
+ORIENT_CUES = {"z": r"수직\s*(?:으로|이|하게)?\s*(?:세|정렬|배향|서)|세로\s*(?:로)?\s*(?:세|정렬|배향|서)|세워|세운|vertical(?:ly)?\s*(?:align|orient|stand)"
+                    r"|(?:align|orient)\w*\s+(?:vertically|along\s+z|in\s+z|through)|through[- ]?(?:plane|thickness)\s+(?:align|orient)"
+                    r"|두께\s*방향\s*(?:으로\s*)?(?:세|정렬|배향)|z\s*(?:축\s*)?(?:으로\s*)?(?:정렬|배향|align|orient)",
                "xy": r"수평|면내|눕혀|눕힌|in[- ]?plane|lateral|가로\s*방향|\bxy\b",
                "iso": r"무작위|랜덤|등방|random|isotrop"}
+# an accuracy level or "decide for me" needs a word that says it (the rules read the plain words; these are
+# the roundabout ones the model may read: "대충", "논문에 쓸", "천천히 제대로")
+QUALITY_CUES = {"fast": r"빠르|빨리|빠른|대충|간단|대략|러프|스크리닝|급|금방|가볍게|fast|quick|rough|screen|draft|hurry|asap",
+                "standard": r"표준|보통|일반|기본|중간|standard|normal|regular|default|medium",
+                "accurate": r"정확|정밀|논문|보고|상세|자세|꼼꼼|제대로|신뢰|고정밀|천천히|accura|precis|publica|report|careful|"
+                            r"detail|rigor|thorough"}
+AUTO_CUES = (r"알아서|자동|적당|적절|맡기|맡길|맡겨|추천|아무거나|상관\s*없|기본\s*값|디폴트|나머지는|auto|yourself|you\s+decide|"
+             r"your\s+call|whatever|default|recommend|up\s+to\s+you")
 COMPARE = re.compile(r"비교|중\s*(?:에|에서)?\s*(?:어느|뭐가|뭐|어떤\s*게|무엇이)|어느\s*(?:쪽|것|게)|\bvs\.?\b|versus|\bcompare|"
                      r"which\s+(?:one|is|of|works|gives)|뭐가\s*(?:더\s*)?(?:나아|낫|좋)|무엇이\s*(?:더\s*)?(?:나아|낫|좋)|"
                      r"or\s+\w+(?:\s+\w+)?\s*,?\s*which", re.IGNORECASE)
@@ -93,7 +110,15 @@ SCHEMA = {
             "props": _PROPS},
             "required": ["material", "percent"]}},
         "analyses": {"type": "array", "items": {"enum": ANALYSIS_KEYS}},
-        "task": {"enum": ["run", "doe", "calibration", "optimization", "structure"]},
+        "task": {"enum": ["run", "doe", "calibration", "optimization", "structure", "design"]},
+        "design": {"type": ["object", "null"], "properties": {
+            "minimize": {"enum": ["content", "viscosity", None]},
+            "target_property": {"enum": ["k", "sigma", "eps_r", "alpha", "E", None]}, "target_value": _NUM,
+            "target_op": {"enum": [">=", "<=", "=", None]}, "direction": {"enum": ["z", "xy", None]},
+            "content_max": _NUM, "content_min": _NUM, "size_max_um": _NUM, "size_min_um": _NUM,
+            "find": {"type": "array", "items": {"enum": ["content", "size", "ratio"]}},
+            "prefer": {"type": "array", "items": {"enum": ["low_viscosity", "high_packing"]}},
+            "single_size": {"type": ["boolean", "null"]}}},
         "doe": {"type": "array", "items": {"type": "object", "properties": {
             "filler": {"type": "integer"}, "what": {"enum": ["content", "size"]},
             "from": _NUM, "to": _NUM, "steps": {"type": ["integer", "null"]}, "step": _NUM,
@@ -110,7 +135,8 @@ SCHEMA = {
             "directions": {"enum": ["z", "xyz", None]},
             "orientation": {"enum": ["z", "xy", "iso", None]},
             "cores": {"type": ["integer", "null"]}, "parallel_runs": {"type": ["integer", "null"]},
-            "seeds": {"type": ["integer", "null"]}, "rve_um": _NUM, "voxel_um": _NUM, "film_um": _NUM}},
+            "seeds": {"type": ["integer", "null"]}, "rve_um": _NUM, "voxel_um": _NUM, "film_um": _NUM,
+            "r_int": _NUM, "r_contact": _NUM}},
     },
     "required": ["matrix", "fillers", "analyses", "task"],
 }
@@ -175,8 +201,12 @@ Rules:
   the sample. unknowns: what to fit: r_int (interface resistance), r_contact (particle contact), filler_k.
 - settings: quality fast/standard/accurate (빠르게/대충 -> fast, 정확하게/정밀 -> accurate); decide_for_me true
   for "알아서", "자동으로", "decide for me"; directions z or xyz (3방향, all directions); orientation z (aligned
-  vertically), xy (in plane), iso (random); cores; parallel_runs (runs at the same time); seeds (repeats);
-  rve_um (RVE size); voxel_um; film_um (film thickness).
+  vertically), xy (in plane), iso (random) - only when the particles are said to be aligned ("z방향 열전도도" is
+  the direction of the property, directions z, not an orientation); cores; parallel_runs (runs at the same
+  time); seeds (repeats); rve_um (RVE size); voxel_um; film_um (film thickness, "10um 두께 필름" -> 10);
+  r_int (filler-resin interface resistance, m2K/W, "필러-레진 열저항 1E-8" -> 1e-8); r_contact (filler-filler).
+- task design only when a target is to be reached with the least filler or by sizes to be found ("열전도도 3 W/mK
+  되는 최소 함량과 크기"): then the filler's percent and size_um are null and the target is never a material prop.
 
 Materials (id: names):
 {materials}
@@ -229,6 +259,8 @@ EXAMPLES = [
     ("BT 레진에 실리카 넣으면 어떻게 될까",
      {"matrix": {"material": "bt"}, "fillers": [{"material": "sio2", "percent": None}], "analyses": [], "task": "run"}),
 ]
+# (design requests have no example here: the rules read them fully (design.py), and examples of them made the
+# 2B model copy their numbers and confuse silica with SiC in ordinary requests)
 
 
 def system_prompt(lex):
@@ -559,13 +591,23 @@ def build_intent(js, text, lex, rule_it, all_text=None):
             mine += [squash(w) for w, ids in L.AMBIGUOUS.items() if mid in ids and len(squash(w)) >= 2]
             if any(n in seg and n != seg for n in mine) or mid in strong_rule:
                 mid = rule_mx          # a name inside the matrix's longer name, or a filler the rules read as one
-        if mid and ev:
+        if mid and ev == "fuzzy" and not rule_mx and not strong_by_sound(mid, src, lex):
+            # a matrix found only by a vague likeness ("substrate" ~ substrate glass): asked, the model's first
+            word = next((r.get("text") for r in rule_it.get("fillers") or []
+                         if r.get("text") and (mid in (r.get("choices") or []) or r.get("id") == mid
+                                               or mid in [a[0] if isinstance(a, (list, tuple)) else a for a in r.get("alts") or []])),
+                        mx["material"])
+            s = _slot(None, word, "matrix")
+            s.update(choices=[mid], kind="material?", how="fuzzy")
+            it["matrix"] = s
+        elif mid and ev:
             s = _slot(mid, mx["material"], "matrix")
             if rule_mx == mid:
                 s["how"] = (rule_it.get("matrix") or {}).get("how") or "exact"
             elif rule_mx:
                 rep["differs"].append(("matrix", rule_mx, mid))
             s["props"] = _props(mx.get("props"), nums, rep, mid)
+            _not_measured(s, rule_it, rep)
             s["amount"] = num(mx.get("amount"), "said", "matrix amount")
             it["matrix"] = s
         else:
@@ -584,6 +626,13 @@ def build_intent(js, text, lex, rule_it, all_text=None):
     fillers = []
     raw_fl = js.get("fillers") if isinstance(js.get("fillers"), list) else []
     model_ids = [resolve_material(h.get("material"), src, lex) for h in raw_fl if isinstance(h, dict)]
+    # a filler the rules read by name that the model left out, for a material the model named that the sentence
+    # does not hold ("실리카" read as SiC): the sentence's material takes the model's numbers
+    taken_back = negated_ids(src, lex, {r.get("id") for r in rule_fl if r.get("id")})
+    uncovered = [r["id"] for r in rule_fl if r.get("id") and r["id"] not in model_ids and r.get("how") in ("exact", "fuzzy")
+                 and r["id"] not in (rule_mx, (it.get("matrix") or {}).get("id")) and r["id"] not in taken_back]
+    uncovered = list(dict.fromkeys(uncovered))
+    swapped = {}
     for h in raw_fl:
         if not isinstance(h, dict) or not isinstance(h.get("material"), str):
             continue
@@ -604,6 +653,12 @@ def build_intent(js, text, lex, rule_it, all_text=None):
         # or while a word holds a known name inside an unknown one: not used
         if ev == "fuzzy" and not strong_by_sound(mid, src, lex) and [r for r in strong_rule if r not in model_ids]:
             ev = None
+        if mid and not ev and (mid in swapped or uncovered):
+            sub = swapped.get(mid) or uncovered.pop(0)
+            if mid not in swapped:
+                rep["differs"].append(("filler_swapped", mid, sub))
+            swapped[mid] = sub
+            mid, ev = sub, "rules"
         if not mid or not ev:
             if mid:
                 rep["dropped"].append(f"filler {h['material']}")
@@ -626,10 +681,15 @@ def build_intent(js, text, lex, rule_it, all_text=None):
                              if isinstance(c, str) and c != mid]
             s["confirm"] = list(dict.fromkeys(cands))[:4]
         same = [f for f in rule_fl if f.get("id") == mid]
-        if model_ids.count(mid) > 1:
+        # the shape word the rules found holds for every copy of the material ("판상 BN" written twice)
+        shape0 = same[0].get("shape") if len(same) == 1 else None
+        how0 = (same[0].get("how") or "exact") if len(same) == 1 else None
+        if model_ids.count(mid) > 1 or sum(1 for x in model_ids if swapped.get(x) == mid) > 1:
             same = []                   # one material in two sizes or contents: the rules read only one of them
         if same:
             s["how"] = same[0].get("how") or "exact"
+        elif how0:
+            s["how"] = how0             # its name read by the rules holds for every copy of it
         # content
         pct = h.get("percent")
         basis = h.get("basis") if h.get("basis") in ("vol", "wt", "phr") else None
@@ -695,7 +755,12 @@ def build_intent(js, text, lex, rule_it, all_text=None):
         # shape and size: a size the rules read with its unit stands
         if len(same) == 1 and same[0].get("shape"):
             s["shape"], s["shape_src"] = same[0]["shape"], same[0].get("shape_src")
-        elif h.get("shape") in ("sphere", "platelet", "fiber", "irregular", "cube"):
+        elif shape0:
+            s["shape"], s["shape_src"] = shape0, "text"
+        elif h.get("shape") in ("sphere", "platelet", "fiber", "irregular", "cube") and (
+                re.search(SHAPE_CUES[h["shape"]], src, re.IGNORECASE)
+                or any(w in (mid or "") for w in {"platelet": ("platelet", "flake"), "fiber": ("fiber", "wire", "cnt")}.get(h["shape"], ()))):
+            # a shape needs a word for it ("은 필러" is not a flake)
             s["shape"], s["shape_src"] = h["shape"], "llm"
         for key, field in (("size_um", "size_um"), ("size_std_um", "std_um"), ("length_um", "length_um"),
                            ("thickness_um", "thickness_um")):
@@ -721,6 +786,7 @@ def build_intent(js, text, lex, rule_it, all_text=None):
             if len(same) == 1 and same[0].get(k):
                 s[k] = same[0][k]
         s["props"] = _props(h.get("props"), nums, rep, mid)
+        _not_measured(s, rule_it, rep)
         if s.get("confirm"):            # asked, the model's choice first
             s["choices"], s["id"], s["kind"] = s.pop("confirm"), None, "material?"
         fillers.append(s)
@@ -749,6 +815,8 @@ def build_intent(js, text, lex, rule_it, all_text=None):
 
     # ---- task, DOE, calibration, optimisation
     task = js.get("task") if js.get("task") in ("run", "doe", "calibration", "optimization", "structure") else None
+    if js.get("task") == "design":
+        task = None                    # a design stands only when its parts check out (_design_part)
     if task:
         it["task"] = None if task == "run" else task
     factors = []
@@ -812,16 +880,20 @@ def build_intent(js, text, lex, rule_it, all_text=None):
     if not factors and "calibration" not in (js.get("task"), it.get("task"), rule_it.get("task")):
         ids = [f.get("id") for f in it["fillers"]]
         for mid in {i for i in ids if i and ids.count(i) > 1}:
-            rf = [x for x in rule_it["doe"]["factors"] if x.get("what") == "content"
-                  and x.get("filler", 0) < len(rule_it["fillers"]) and rule_it["fillers"][x.get("filler", 0)].get("id") == mid]
+            of = [x for x in rule_it["doe"]["factors"]
+                  if x.get("filler", 0) < len(rule_it["fillers"]) and rule_it["fillers"][x.get("filler", 0)].get("id") == mid]
+            rf = [x for x in of if x.get("what") == "content"]
             if not rf:
                 continue
             keep = next(f for f in it["fillers"] if f.get("id") == mid)
             it["fillers"] = [f for f in it["fillers"] if f.get("id") != mid or f is keep]
             rs = rule_it["fillers"][rf[0].get("filler", 0)]
             keep["content"] = copy.deepcopy(rs.get("content"))
+            for key in ("size_um", "size_range", "size_levels"):
+                if rs.get(key):              # 30~55%, 5~30 um written as two copies: the size sweep too
+                    keep[key] = copy.deepcopy(rs[key])
             k = next(i for i, f in enumerate(it["fillers"]) if f is keep)
-            it["doe"]["factors"] = [dict(x, filler=k) for x in rf]
+            it["doe"]["factors"] = [dict(x, filler=k) for x in of]
             if it.get("task") not in ("doe", "optimization"):
                 it["task"] = "doe"
     # a best value wanted over a range, or measurements to fit: the rules' words stand
@@ -881,10 +953,18 @@ def build_intent(js, text, lex, rule_it, all_text=None):
 
     # ---- settings: what the rules read from explicit words stands; the model fills the rest
     st = js.get("settings") if isinstance(js.get("settings"), dict) else {}
+    # a setting needs a word for it: an accuracy the sentence does not ask for would change the grid (Accurate
+    # put a 40-case design of sub-µm particles at 55 GB a case); "decide for me" needs its words too
     if st.get("quality") in ("fast", "standard", "accurate") and not rule_it.get("quality"):
-        it["quality"] = st["quality"]
+        if re.search(QUALITY_CUES[st["quality"]], src, re.IGNORECASE):
+            it["quality"] = st["quality"]
+        else:
+            rep["dropped"].append(f"quality {st['quality']} (no word for it)")
     if st.get("decide_for_me") is True:
-        it["auto"] = True
+        if re.search(AUTO_CUES, src, re.IGNORECASE):
+            it["auto"] = True
+        else:
+            rep["dropped"].append("decide for me (no word for it)")
     if st.get("directions") in ("z", "xyz") and not rule_it.get("directions"):
         it["directions"] = st["directions"]
     if not rule_it.get("orientation"):
@@ -901,11 +981,19 @@ def build_intent(js, text, lex, rule_it, all_text=None):
     v = st.get("seeds")
     if isinstance(v, int) and not isinstance(v, bool) and _close(float(v), nums) and not rule_it.get("seeds"):
         it["seeds"] = v
-    for key, path in (("rve_um", ("rve", "L_um")), ("voxel_um", ("rve", "voxel_um"))):
+    # a grid or a film needs its word in the sentence: "입경 10~60um" holds a 10, which is no voxel
+    for key, path, word in (("rve_um", ("rve", "L_um"), r"rve|한\s*변|도메인|domain|box|박스|edge"),
+                            ("voxel_um", ("rve", "voxel_um"), r"복셀|voxel|격자|해상도|grid|resolution")):
         v = num(st.get(key), "len", key)
+        if v and not re.search(word, src, re.IGNORECASE):
+            rep["dropped"].append(f"{key} = {v:g} (no word for it)")
+            v = None
         if v:
             it[path[0]][path[1]] = v
     v = num(st.get("film_um"), "len", "film")
+    if v and not re.search(r"필름|박막|두께|시트|film|thick|sheet|layer|층|코팅|coating", src, re.IGNORECASE):
+        rep["dropped"].append(f"film = {v:g} (no word for it)")
+        v = None
     if v:
         it["film"] = v
 
@@ -918,6 +1006,7 @@ def build_intent(js, text, lex, rule_it, all_text=None):
     it["unresolved"] = [u for u in it["unresolved"] if u.get("kind") != "content"]
     fill_gaps(it, rule_it, js, text, rep, lex)
     _order_by_text(it, rule_it, src, lex)
+    _design_part(it, rule_it, js, nums, rep, src)
     # a sweep points at a filler that is there
     n = len(it.get("fillers") or [])
     it["doe"]["factors"] = [f for f in it["doe"].get("factors") or []
@@ -937,6 +1026,104 @@ def build_intent(js, text, lex, rule_it, all_text=None):
     return it, rep
 
 
+def _not_measured(s, rule_it, rep):
+    """A material value equal to a measurement of the composite ("20wt%일 때 1.1 W/mK ... BN 열전도도 보정"
+    read as BN's k = 1.1) is the measurement, not the material's."""
+    meas = [m["value"] for m in (rule_it.get("calibration") or {}).get("measurements") or []]
+    for k in list((s.get("props") or {}).keys()):
+        if _close(s["props"][k], meas):
+            rep["dropped"].append(f"{s.get('id')}.{k} = {s['props'][k]:g} (a measurement, not the material's value)")
+            del s["props"][k]
+    if s.get("props") == {}:
+        s["props"] = None
+
+
+def _design_part(it, rule_it, js, nums, rep, src=""):
+    """A design request: the rules' reading of its explicit parts stands, the
+    model's fills the rest (each number from the sentence). The numbers of
+    the design - its bounds and its target - are then nobody's content,
+    size or material value: a model that put 100 - 62 = 38 % on the filler,
+    200 nm as its size or the target k = 3 as alumina's conductivity read
+    them from the wrong place."""
+    from . import design as DZ
+    from .parser import apply_design
+    md = DZ.from_model(js.get("design"), nums, derivable)
+    # the model completes a design the rules saw (a target or a content to minimise in the words), never starts
+    # one: "CTE가 최소가 되도록 최적화" is an optimisation, whatever the model calls it
+    rd = rule_it.get("design") or {}
+    if not (rd.get("targets") or rd.get("objective")):
+        md = DZ.empty()
+    # what is to be found needs a word for it: a size said with its unit ("구형 알루미나 20um") is not one to find
+    low = (src or "").lower()
+    rf = set((rule_it.get("design") or {}).get("find") or [])
+    for key, rx in (("size", DZ.FIND_SIZE), ("ratio", DZ.FIND_RATIO)):
+        if key in md["find"] and key not in rf and not re.search(rx, low):
+            md["find"] = [x for x in md["find"] if x != key]
+    d = DZ.combine(rule_it.get("design"), md)
+    st = js.get("settings") if isinstance(js.get("settings"), dict) else {}
+    for k in ("r_int", "r_contact"):
+        v = st.get(k)
+        if d.get(k) is None and isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 1e-3 \
+                and derivable(v, nums, "said") == "said":
+            d[k] = float(v)
+    keep_task = it.get("task")
+    apply_design(it, d)
+    if not (DZ.active(d) or DZ.wanted(d)):
+        it["task"] = keep_task
+        return
+    # viscosity is the design's own business (closed forms, then the check run): no note on who read it
+    rep["differs"] = [x for x in rep["differs"] if not (x[0] in ("analyses", "analyses_rules")
+                                                        and set(x[1]) ^ set(x[2]) <= {"viscosity"})]
+    rep["restored"] = [x for x in rep["restored"] if x != "analyses viscosity"]
+    pct, size, prop = DZ.design_numbers(d)
+    finding = set(d.get("find") or [])
+    factors = (1.0, 1e3, 1e-3, 100.0, 0.01, 1e6, 1e-6)
+
+    def target_like(v, vals):
+        # the target itself, or the target through a unit factor (3 W/mK read as k = 3e6)
+        return any(t and abs(v / (t * f) - 1.0) < 1e-6 for t in vals for f in factors)
+    for f in it.get("fillers") or []:
+        c = f.get("content") or {}
+        if c.get("value") is not None and ("content" in finding or any(abs(c["value"] - x) < 1e-6 for x in pct)):
+            rep["dropped"].append(f"{f.get('id')} {c['value']:g}% (the design finds the content)")
+            f["content"] = None
+        for key in ("size_um", "std_um"):
+            if f.get(key) is not None and any(abs(f[key] - x) < 1e-9 for x in size):
+                rep["dropped"].append(f"{f.get('id')} {f[key]:g} µm (a bound of the design)")
+                f[key] = None
+                if key == "size_um":
+                    f["size_src"] = None
+        for k, vals in prop.items():
+            if (f.get("props") or {}).get(k) is not None and target_like(f["props"][k], vals):
+                rep["dropped"].append(f"{f.get('id')}.{k} = {f['props'][k]:g} (the target, not the material's value)")
+                del f["props"][k]
+                f["props"] = f["props"] or None
+    mx = it.get("matrix") or {}
+    for k, vals in prop.items():
+        if (mx.get("props") or {}).get(k) is not None and target_like(mx["props"][k], vals):
+            del mx["props"][k]
+            mx["props"] = mx["props"] or None
+    # one material written as two copies ("BN은 2~10um" as 2 and 10, "은 플레이크" twice) where the words give no
+    # second class (no "두 가지 크기", no blend of one material, no sizes said one by one): one filler, the rules'
+    if not (rd.get("classes") or rd.get("sizes_said") or rd.get("class_sizes") or "ratio" in (rd.get("find") or [])):
+        ids = [f.get("id") for f in it.get("fillers") or []]
+        for mid in {i for i in ids if i and ids.count(i) > 1}:
+            rs = [r for r in rule_it.get("fillers") or [] if r.get("id") == mid]
+            if len(rs) != 1:
+                continue
+            keep = next(f for f in it["fillers"] if f.get("id") == mid)
+            it["fillers"] = [f for f in it["fillers"] if f.get("id") != mid or f is keep]
+            for key in ("shape", "shape_src", "size_um", "size_src", "size_range", "aspect", "length_um", "thickness_um"):
+                if rs[0].get(key) is not None:
+                    keep[key] = copy.deepcopy(rs[0][key])
+            if "size" in (d.get("find") or []):
+                keep["size_um"], keep["size_src"] = None, None
+            rep["dropped"].append(f"{mid}: one filler, written twice")
+    # the film said in the sentence holds even when the model left it out
+    if not it.get("film") and rule_it.get("film"):
+        it["film"] = rule_it["film"]
+
+
 # words that take something back or correct it: then what the model left out stays out
 TAKE_BACK = re.compile(r"말고|아니고|아니라|려다가?|으려다|하기로|아니\s|아니,|빼고|빼줘|빼서|빼면|제외|대신|필요\s*없|안\s*넣|없이|그만|정정|바꿔|바꾸|"
                        r"\binstead\b|\bnot\b|n't|\bskip|\bwithout\b|\bexcept\b|rather than|\bno\b|\bactually\b|"
@@ -946,7 +1133,9 @@ VAGUE = re.compile(r"살짝|조금\s*(?:더|넘|많|적)|약간\s*(?:더|넘|많
                    r"more than|less than|a bit|at least|at most|over\b|under\b|above|below", re.IGNORECASE)
 
 
-NEGATED_AFTER = re.compile(r"^\s*(?:은|는|을|를|이|가|도)?\s*(?:빼고|빼줘|빼서|빼면|말고|제외|없이|아니고|아니라|대신|\S{0,6}려다)")
+# (an amount may stand between: "산화마그네슘 30% 하려다가")
+NEGATED_AFTER = re.compile(r"^\s*(?:\d+(?:\.\d+)?\s*(?:%|퍼|프로|vol\s*%|wt\s*%)?\s*)?(?:은|는|을|를|이|가|도)?\s*"
+                           r"(?:빼고|빼줘|빼서|빼면|말고|제외|없이|아니고|아니라|대신|\S{0,6}려다)")
 NEGATED_BEFORE = re.compile(r"(?:\bnot|\bno|\bwithout|\bexcept|\binstead\s+of|\bminus|\bskip|\bdrop)\s+(?:the\s+|any\s+)?$",
                             re.IGNORECASE)
 
@@ -1001,6 +1190,25 @@ def fill_gaps(it, rule_it, js, text, rep, lex):
         for g in neg:
             rep["differs"].append(("filler_removed", g, None))
         it["fillers"] = [f for f in it["fillers"] if f.get("id") not in neg]
+    elif neg and it["fillers"]:
+        # every filler the model kept is taken back ("산화마그네슘 30% 하려다가 산화아연으로"): the one the sentence
+        # turns to takes its place, with its amount when it has none of its own
+        mxid = (it.get("matrix") or {}).get("id")
+        repl = [r for r in rule_it.get("fillers") or [] if r.get("id") and r["id"] not in neg and r["id"] != mxid
+                and r.get("how") in ("exact", "fuzzy")]
+        if repl:
+            old = it["fillers"]
+            new = []
+            for k, r in enumerate(repl):
+                f = copy.deepcopy(r)
+                src_f = old[min(k, len(old) - 1)]
+                for key in ("content", "size_um", "shape", "size_src", "shape_src"):
+                    if f.get(key) is None and src_f.get(key) is not None:
+                        f[key] = copy.deepcopy(src_f[key])
+                new.append(f)
+            for g in neg:
+                rep["differs"].append(("filler_removed", g, None))
+            it["fillers"] = new
     model_ids = {f.get("id") for f in it["fillers"]}
     # a filler comes back unless the sentence takes it back, or a word that takes back is next to it
     mspans = list((rule_it.get("matrix") or {}).get("spans") or [])
@@ -1075,17 +1283,19 @@ def _size_said(text, v, key):
     word next to it (not an aspect ratio of 10); a spread with a spread word."""
     from .textnorm import normalize
     t = normalize(text or "").lower()
-    cands = {v, v * 1000.0, v / 1000.0}
     for m in re.finditer(r"(?<![0-9.])(\d+(?:\.\d+)?)", t):
         x = float(m.group(1))
-        if not _close(x, list(cands)):
-            continue
         before, after = t[max(0, m.start() - 14):m.start()], t[m.end():m.end() + 12]
+        u = re.match(r"\s*(" + _LEN_UNIT + ")", after)
+        # the value in µm of this number with its own unit: 200 nm is 0.2, never 200
+        scale = 1.0 if not u else 1e-3 if re.match(r"nm|나노", u.group(1)) else 1e3 if re.match(r"mm|밀리", u.group(1)) else 1.0
+        if not _close(v, [x * scale]):
+            continue
         if key == "size_std_um":
             if re.search(_SPREAD_WORD, before + after):
                 return True
             continue
-        if re.match(r"\s*" + _LEN_UNIT, after) or re.search(_SIZE_WORD + r"[^0-9]{0,6}$", before):
+        if u or re.search(_SIZE_WORD + r"[^0-9]{0,6}$", before):
             return True
     return False
 
@@ -1223,5 +1433,14 @@ def state_of(it, ans=None):
                       if f["what"] in ("content", "size")]
     st = {"quality": ans.get("quality") or it.get("quality"), "directions": it.get("directions"),
           "film_um": it.get("film"), "decide_for_me": bool(it.get("auto") or ans.get("_auto")) or None}
+    st.update({k: v for k, v in (it.get("interface") or {}).items() if v is not None})
     out["settings"] = st
+    d = it.get("design") or {}
+    if it.get("task") == "design" and d:
+        tg = (d.get("targets") or [{}])[0]
+        out["design"] = {"minimize": d.get("objective"), "target_property": tg.get("property"),
+                         "target_value": tg.get("value"), "target_op": tg.get("op"), "direction": tg.get("direction"),
+                         "content_max": d.get("content_max"), "content_min": d.get("content_min"),
+                         "size_max_um": d.get("size_max_um"), "size_min_um": d.get("size_min_um"),
+                         "find": d.get("find"), "prefer": d.get("prefer"), "single_size": d.get("mono") or None}
     return out

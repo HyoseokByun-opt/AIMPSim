@@ -150,4 +150,6 @@ def normalize(text):
     t = english_numbers(t)
     # a dash between two numbers is a range: "40-60%" (not "SU-8", "FR-4")
     t = re.sub(r"(?<![A-Za-z\-])(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)", r"\1~\2", t)
+    # "PPE+실리카", "epoxy+silica": two names joined by a plus (not 1E+4)
+    t = re.sub(r"(?<=[A-Za-z가-힣)])\+(?=[A-Za-z가-힣(])", " + ", t)
     return re.sub(r"[ \t]+", " ", t).strip()

@@ -170,6 +170,10 @@ def release():
                     continue
                 z.write(os.path.join(base, f), f"{top}/AIMPSim/" + rel.replace(os.sep, "/"))
         z.write(os.path.join(AI, "README.md"), f"{top}/README_AIMPSim.md")
+        # the images of the AIMPSim README (the standard edition's package leaves them out)
+        for f in sorted(os.listdir(os.path.join(ROOT, "docs", "images"))):
+            if f.startswith("aimpsim_"):
+                z.write(os.path.join(ROOT, "docs", "images", f), f"{top}/docs/images/{f}", compress_type=zipfile.ZIP_STORED)
     os.replace(zpath + ".part", zpath)
     if os.path.getsize(zpath) >= GITHUB_ASSET_MAX:
         sys.exit(f"{zname}: {os.path.getsize(zpath) / 2**30:.2f} GB - a GitHub release file must stay under 2 GiB")

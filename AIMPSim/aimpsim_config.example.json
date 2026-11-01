@@ -1,9 +1,10 @@
 {
-  "_comment": "Copy to aimpsim_config.json only to override the model shipped in AIMPSim/llm/. {\"llm\": \"off\"} reads requests by rules alone; {\"llm\": {\"url\": \"http://127.0.0.1:8089\"}} uses a llama-server already running.",
+  "_comment": "Copy to aimpsim_config.json only to override the model shipped in AIMPSim/llm/. {\"llm\": \"off\"} reads requests by rules alone; {\"llm\": {\"url\": \"http://127.0.0.1:8089\"}} uses a llama-server already running. max_rounds: the safety limit on the rounds of a design, optimisation or calibration that runs until it answers (they end on their own criteria; 0 = no limit).",
   "llm": {
     "server_exe": "C:/llama/llama-server.exe",
     "model": "C:/models/model-Q4_K_M.gguf",
     "threads": 6,
     "timeout_s": 120
-  }
+  },
+  "max_rounds": 12
 }

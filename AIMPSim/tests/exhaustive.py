@@ -27,6 +27,7 @@ import collections
 import itertools
 import os
 import random
+import re
 import sys
 import time
 
@@ -136,8 +137,17 @@ def grade(case, planner, validate, read=None):
         want = [(a, round(b, 6), c) for a, b, c in e["cal"]]
         if got != want:
             errs.append(f"measurements {got} != {want}")
-        if "unknowns" in e and (p.get("cal") or {}).get("unknowns") != e["unknowns"]:
-            errs.append(f"unknowns {(p.get('cal') or {}).get('unknowns')} != {e['unknowns']}")
+        # what was read (the AI may then recommend other unknowns for data the read ones cannot reach)
+        cal_ = p.get("cal") or {}
+        def path_of(k):
+            m = re.match(r"(filler|matrix)_(.+)$", k)
+            if m:
+                return ("phases.0" if m.group(1) == "filler" else "matrix") + ".props." + m.group(2)
+            return {"r_int": "phases.0.r_int", "r_contact": "phases.0.r_contact"}.get(k, k)
+        read_ = [path_of(k) for k in cal_.get("asked") or []] or [u["path"] if isinstance(u, dict) else u
+                                                                   for u in cal_.get("unknowns") or []]
+        if "unknowns" in e and read_ != e["unknowns"]:
+            errs.append(f"unknowns {read_} != {e['unknowns']}")
     if "goal" in e and (p.get("opt") or {}).get("goal") != e["goal"]:
         errs.append(f"goal {(p.get('opt') or {}).get('goal')} != {e['goal']}")
     if errs:
@@ -348,6 +358,10 @@ def sweep_calibration(lex):
         fk = "은 필러" if fid == "ag" else "실리카"
         k1, k2 = (0.32, 0.55) if prop == "k" else ((2.5, 40.0) if prop == "sigma" else ((45.0, 30.0) if prop == "alpha" else (6.0, 11.0)))
         t = f"에폭시에 구형 {fk} 10um, 20%일 때 {k1:g} {u}, 40%일 때 {k2:g} {u} 측정됐어. {uw} 보정해줘"
+        # an interface or contact resistance acts on the heat flow only (MPSim's thermal solve): for another
+        # property the material value that property depends on is fitted instead, and the summary says why
+        if prop != "k":
+            up = [{"sigma": "phases.0.props.sigma", "alpha": "matrix.props.alpha", "E": "matrix.props.E"}[prop]]
         out.append(Case("calibration", t, {"task": "calibration", "cal": [(prop, k1 * f, 20.0), (prop, k2 * f, 40.0)],
                                            "unknowns": up}))
     out.append(Case("calibration", "measured 0.32 W/mK at 20% and 0.55 W/mK at 40% for epoxy with spherical silica 10 um, "

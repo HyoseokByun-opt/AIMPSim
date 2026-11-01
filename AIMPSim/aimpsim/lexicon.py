@@ -81,7 +81,7 @@ class Lexicon:
                 self.terms.setdefault(squash(al), []).append(("unknown_param", key, al))
         self.stop = {squash(w) for w in L.STOP["ko"] + L.STOP["en"] + L.STOP_KO_EXTRA}
         self.particles = sorted(L.PARTICLES, key=len, reverse=True)
-        self.affix = sorted({squash(w) for w in L.ROLE_FILLER["ko"] + L.ROLE_MATRIX["ko"]
+        self.affix = sorted({squash(w) for w in L.ROLE_FILLER["ko"] + L.ROLE_MATRIX["ko"] + L.MATRIX_FORM["ko"]
                              + [w for a in L.SHAPES.values() for w in a["ko"]]}, key=len, reverse=True)
         # Korean aliases (2+ syllables) found inside longer Hangul tokens
         self.ko_sub = sorted({(squash(al), "mat") for al in self.mat if has_hangul(al) and len(al) >= 2}
@@ -211,6 +211,11 @@ class Lexicon:
                     # one Latin letter is a metal only next to a number or a filler word ("W 30%", not "W/mK")
                     if n == 1 and len(parts[0]) == 1 and hits and not self._short_ok(toks, i):
                         hits = [h for h in hits if h[0] != "material"]
+                    # "In a 10 um film", "In the ...", "At 50 %": a preposition, not indium or astatine
+                    if n == 1 and parts[0] in ("In", "At", "As", "Be", "No", "So", "He", "Is", "On") and hits \
+                            and i + 1 < len(toks) and toks[i + 1][0].lower() in ("a", "an", "the", "this", "that", "my",
+                                                                                   "our", "each", "every", "it", "we", "i"):
+                        hits = [h for h in hits if h[0] != "material"]
                     # a Latin word with a filler or resin word attached names a material ("XYZ필러")
                     if hits and n == 1 and not has_hangul(parts[0]) and i + 1 < len(toks)                             and toks[i + 1][1] == toks[i][2] and self._role_word(toks[i + 1][0])                             and not any(h[0] == "material" for h in hits):
                         hits = []
@@ -247,7 +252,7 @@ class Lexicon:
             def known(r):
                 c = self.strip(r)
                 return (not c or r in self.particles or c in self.particles or squash(c) in self.stop
-                        or squash(c) in self.terms or squash(r) in self.terms)
+                        or squash(c) in self.terms or squash(r) in self.terms or squash(c) in self.affix)
             rest = [r for r in pieces if not known(r)]
             dropped = False
             for kind, key, a, b in local:
@@ -315,6 +320,9 @@ class Lexicon:
     def _short_ok(self, toks, i):
         """은/금/철/동 as a material: next to a filler word, a number, a shape
         word or the element symbol in brackets."""
+        # written onto a Latin word or a number ("topcut은", "3um은"): a particle, not silver
+        if i > 0 and toks[i - 1][2] == toks[i][1] and re.match(r"[A-Za-z0-9%]", toks[i - 1][0][-1:]):
+            return False
         near = [toks[k][0] for k in range(max(0, i - 3), min(len(toks), i + 3)) if k != i]
         words = {squash(w) for w in L.ROLE_FILLER["ko"] + L.ROLE_FILLER["en"]
                  + [x for a in L.SHAPES.values() for x in a["ko"] + a["en"]]}
@@ -326,6 +334,13 @@ class Lexicon:
         names nothing known."""
         near = [squash(toks[k][0]) for k in (i - 1, i + 1) if 0 <= k < len(toks)]
         t = toks[i][0]
+        if has_hangul(t) and self.strip(t).endswith(L.NOT_MATERIAL_KO):
+            return False                 # 예전해석에서, 실험조건: words of the work, not a material
+        if has_hangul(t) and (self.strip_particles(t) in L.SIZE_CLASS_KO or self.strip(t) in L.SIZE_CLASS_KO
+                              or self.strip(t) + "입자" in L.SIZE_CLASS_KO):
+            return False                 # 대입자, 소입자, 미세입자: a class of sizes, not a material
+        if t.lower() in L.NOT_MATERIAL_EN:
+            return False
         own = has_hangul(t) and any(t.endswith(w) and len(t) > len(w) for w in L.ROLE_FILLER["ko"] + L.ROLE_MATRIX["ko"])
         roles = {squash(w) for w in L.ROLE_FILLER["ko"] + L.ROLE_FILLER["en"] + L.ROLE_MATRIX["ko"] + L.ROLE_MATRIX["en"]}
         return own or any(n in roles for n in near) or _looks_formula(t)

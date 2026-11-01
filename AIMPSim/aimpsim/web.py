@@ -135,6 +135,59 @@ class Assistant:
                 "llm_seconds": s.get("llm_seconds") if llm_used else None,
                 "unresolved": [{k: v for k, v in u.items() if k != "slot"} for u in it.get("unresolved") or []]}
 
+    def loop_answer(self, text, lang="en"):
+        """An option id as it is, or the person's words read as one: a material of the library, wt/vol, stop.
+        A whole request (a matrix and a filler with a content, or an analysis) is not an answer."""
+        import re
+        t = text.strip()
+        if re.fullmatch(r"(?:material|basis):[\w.-]+|stop", t):
+            return t
+        low = t.lower()
+        if re.search(r"멈춰|멈춤|중지|그만|\bstop\b|취소|cancel", low):
+            return "stop"
+        it = parse(t, self.lex)
+        whole = (bool((it.get("matrix") or {}).get("id")) and any(f.get("content") for f in it.get("fillers") or [])) \
+            or bool(it.get("analyses")) or len(t) > 60
+        if whole:
+            return ""
+        if re.search(r"중량|무게|\bwt\b|wt%|weight", low):
+            return "basis:wt"
+        if re.search(r"부피|체적|\bvol\b|vol%|volume", low):
+            return "basis:vol"
+        ids = [f.get("id") for f in it.get("fillers") or [] if f.get("id")]
+        if (it.get("matrix") or {}).get("id"):
+            ids.append(it["matrix"]["id"])
+        return f"material:{ids[0]}" if ids else ""
+
+    def loop_command(self, text, kinds=(), lang="en", waiting=False):
+        """{command: stop | answer | condition | none, ...} for words typed while loops run.
+        kinds: the kinds of the loops running; waiting: a calibration waits for an answer. An answer is
+        taken only then, and never from a whole new request (that one is read as a request; the loops go on)."""
+        import re
+        from . import design as DZ
+        if isinstance(kinds, str):
+            kinds = (kinds,)
+        low = text.lower().strip()
+        if re.search(r"^(?:멈춰|멈춤|중지|그만|stop|halt|취소|cancel)|멈춰|중지해|그만해|stop it", low):
+            return {"command": "stop"}
+        if waiting and "cal" in kinds:
+            a = self.loop_answer(text, lang)
+            if a and a != "stop":
+                return {"command": "answer", "answer": a}
+        if "design" in kinds and len(text) <= 80:
+            d = DZ.read(text)
+            it = parse(text, self.lex)
+            if not ((it.get("matrix") or {}).get("id") and it.get("fillers")):
+                cond = {}
+                if d.get("content_max") is not None:
+                    cond["content_cap"] = float(d["content_max"])
+                m = re.search(DZ.TOL, low)
+                if m:
+                    cond["tol"] = float(m.group(1) or m.group(2))
+                if cond:
+                    return {"command": "condition", "condition": cond}
+        return {"command": "none"}
+
     def warm(self):
         """The AI tab was opened: have the model ready before the first request."""
         self.llm.warm(reader.messages(self.lex, "-"))
@@ -169,6 +222,159 @@ def blueprint(assistant):
     @bp.get("/api/ai/status")
     def ai_status():
         return jsonify(assistant.status())
+
+    @bp.post("/api/ai/calibration/next")
+    def ai_cal_next():
+        """After a calibration: done, run again with another range or other
+        unknowns, ask the person, or stop - and why (calcheck.next_round).
+        With an answer (an option's id or the person's words): the form and
+        unknowns that answer leads to (calcheck.apply_answer, precheck)."""
+        from . import calcheck as CC
+        from .loop import max_rounds
+        b = request.get_json(force=True, silent=True) or {}
+        cal, result = b.get("cal") or {}, b.get("result") or {}
+        lang = b.get("lang") or "en"
+        ko = lang == "ko"
+        lib = assistant.lex.library
+        try:
+            form = assistant.planner._filled(b.get("form") or {})
+            ans = b.get("answer")
+            if ans:
+                ans = assistant.loop_answer(str(ans), lang)
+                if ans == "stop":
+                    return jsonify({"ok": True, "action": "stop", "why": "asked",
+                                    "text": "보정을 멈췄습니다." if ko else "The calibration was stopped."})
+                if not ans:
+                    return jsonify({"ok": True, "action": "ask", "why": "unclear", "options": CC.options(form, cal, lib),
+                                    "text": ("어느 쪽인지 알 수 없습니다. 아래에서 고르거나 재료 이름이나 wt%/vol%로 알려 주세요." if ko
+                                             else "That is not clear: choose below, or name a material or wt%/vol%.")})
+                form2, cal2 = CC.apply_answer(form, cal, ans, lib)
+                asked = [u.get("key") or u["path"] for u in cal.get("unknowns") or []]
+                chk = CC.precheck(form2, cal2, asked, lang) or {}
+                plans = chk.get("plans") or []
+                pick = plans[chk.get("choice", 0)] if plans else {"unknowns": cal.get("unknowns"), "keys": asked}
+                out = {"action": "rerun", "why": "answer", "form": form2, "unknowns": pick["unknowns"],
+                       "keys": "+".join(pick["keys"]), "reachable": chk.get("reachable")}
+                kind_, _, val_ = ans.partition(":")
+                shown = ((lib.get(val_) or {}).get("name") or val_) if kind_ == "material" else (f"{val_}%" if kind_ == "basis" else ans)
+                if ko:
+                    out["text"] = (f"{shown}(으)로 바꿔 다시 점검했습니다: "
+                                   + ("측정에 닿는 조합으로 보정합니다." if chk.get("reachable")
+                                      else "유효매질 점검으로는 아직 닿지 않지만 RVE로 보정해 봅니다."))
+                else:
+                    out["text"] = (f"Changed to {shown} and checked again: "
+                                   + ("calibrating the set that reaches the data." if chk.get("reachable")
+                                      else "the mean field does not reach the data yet; the RVE calibration is run."))
+                out["ok"] = True
+                return jsonify(out)
+            if not cal.get("unknowns") or not result.get("unknowns"):
+                return jsonify({"ok": False, "error": "a calibration and its result are needed"}), 400
+            out = CC.next_round(form, cal, cal["unknowns"], result, list(b.get("tried") or []), lang, lib)
+            limit = max_rounds()
+            if out["action"] == "rerun" and limit and int(b.get("round") or 0) >= limit:
+                out = {"action": "stop", "why": "rounds"}
+            out["text"] = CC.explain(out, cal["unknowns"], result, lang, form, lib)
+        except Exception as e:                                     # noqa: BLE001
+            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+        out["ok"] = True
+        return jsonify(out)
+
+    @bp.post("/api/ai/design/next")
+    def ai_design_next():
+        """One round of a design study (loop.design_round)."""
+        from flask import current_app
+        from . import loop as LP
+        b = request.get_json(force=True, silent=True) or {}
+        store = getattr(current_app, "doe", None)
+        s = store.get(str(b.get("doe_id") or "")) if store is not None else None
+        if s is None:
+            return jsonify({"ok": False, "error": "DOE study not found"}), 404
+        spec = dict(b.get("design") or {})
+        rows, _ = store.rows(s, current_app.queue)
+        state = dict(b.get("state") or {})
+        chk = dict(state.get("check") or {})
+        if chk.get("job") and chk.get("value") is not None and chk.get("real") is None:
+            # the check asked for more than the recipe (the packing's shortfall): the content it holds
+            try:
+                import importlib
+                import json as _json
+                import os as _os
+                job = current_app.queue.get(chk["job"])
+                with open(_os.path.join(job.out_dir, "result.json"), encoding="utf-8") as fh:
+                    got = importlib.import_module(type(store).__module__).realised(s, _json.load(fh))
+                if "real_filler" in got:
+                    chk["real"] = float(got["real_filler"][2])
+                    state["check"] = chk
+            except Exception:                                      # noqa: BLE001
+                pass
+        try:
+            out = LP.design_round(s, rows, spec, state)
+            unit = {"k": "W/m·K", "sigma": "S/m", "alpha": "ppm/K", "E": "GPa"}.get((spec.get("target") or {}).get("property"), "")
+            out["text"] = LP.explain(out, "design", b.get("lang") or "en", unit)
+        except Exception as e:                                     # noqa: BLE001
+            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+        out["ok"] = True
+        return jsonify(out)
+
+    @bp.post("/api/ai/opt/next")
+    def ai_opt_next():
+        """One round of an optimisation study (loop.opt_round)."""
+        from flask import current_app
+        from . import loop as LP
+        b = request.get_json(force=True, silent=True) or {}
+        store = getattr(current_app, "doe", None)
+        s = store.get(str(b.get("doe_id") or "")) if store is not None else None
+        if s is None:
+            return jsonify({"ok": False, "error": "DOE study not found"}), 404
+        rows, metrics = store.rows(s, current_app.queue)
+        keys = [m["key"] for m in metrics if not str(m["key"]).startswith("real_")]
+        want = {"thermal": "k", "electrical": "sigma", "dielectric": "eps", "magnetic": "mu", "cte": "alpha",
+                "viscosity": "mu_r", "emi": "se", "moisture": "D_w", "thermomech": "warp", "joule": "T_joule"}.get(
+            b.get("analysis") or "", "")
+        resp = want if want in keys else (keys[0] if keys else None)
+        if resp is None:
+            return jsonify({"ok": False, "error": "the study gave no response yet"}), 400
+        try:
+            out = LP.opt_round(s, rows, resp, b.get("goal") or "max", b.get("target"), b.get("state") or {})
+            unit = next((m.get("unit") for m in metrics if m["key"] == resp), "")
+            out["text"] = LP.explain(out, "opt", b.get("lang") or "en", unit)
+            out["response"] = resp
+        except Exception as e:                                     # noqa: BLE001
+            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+        out["ok"] = True
+        return jsonify(out)
+
+    @bp.post("/api/ai/loop/command")
+    def ai_loop_command():
+        """Words typed while a study or a calibration runs: stop it, answer its
+        question, or a condition for its next round ("최대 함량은 55%로")."""
+        b = request.get_json(force=True, silent=True) or {}
+        out = assistant.loop_command(str(b.get("text") or ""), b.get("kinds") or b.get("kind") or (),
+                                     b.get("lang") or "en", bool(b.get("waiting")))
+        out["ok"] = True
+        return jsonify(out)
+
+    @bp.post("/api/ai/design")
+    def ai_design():
+        """The recipe of a finished design study (design.recommend): the
+        study's runs from MPSim's DOE store, the design part of the payload
+        that created it."""
+        from flask import current_app
+        from . import design as DZ
+        b = request.get_json(force=True, silent=True) or {}
+        store = getattr(current_app, "doe", None)
+        s = store.get(str(b.get("doe_id") or "")) if store is not None else None
+        if s is None:
+            return jsonify({"ok": False, "error": "DOE study not found"}), 404
+        spec = b.get("design") or {}
+        if not (spec.get("target") or {}).get("property"):
+            return jsonify({"ok": False, "error": "no design target"}), 400
+        rows, _ = store.rows(s, current_app.queue)
+        try:
+            out = DZ.recommend(s, rows, spec)
+        except Exception as e:                                     # noqa: BLE001
+            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+        return jsonify(out)
 
     @bp.get("/ai/static/<path:fn>")
     def ai_static(fn):

@@ -22,7 +22,9 @@ QUALITY_NAME = {"fast": ("Fast(빠름)", "Fast"), "standard": ("Standard(표준)
                 "accurate": ("Accurate(정밀)", "Accurate")}
 TASK_NAME = {"run": ("해석 1건", "One run"), "doe": ("DOE 스터디", "DOE study"), "calibration": ("보정(Calibration)", "Calibration"),
              "optimization": ("최적화 (DOE 후 최적점 탐색)", "Optimization (a DOE, then its optimum)"),
-             "structure": ("구조만 생성", "Structure only")}
+             "structure": ("구조만 생성", "Structure only"),
+             "design": ("설계 탐색 (DOE → 대리모델 → 추천 조합 → 확인 해석)",
+                        "Design search (a DOE, a surrogate, the recommended recipe, a check run)")}
 SRC = {"text": ("입력", "said"), "fuzzy": ("오타·발음 보정", "spelling matched"), "rule": ("단위 규칙", "unit rule"),
        "auto": ("자동", "automatic"), "default": ("기본값", "default"), "answer": ("답변", "answered"),
        "llm": ("AI 추정 - 확인 필요", "AI guess - check it"), "derived": ("계산", "derived")}

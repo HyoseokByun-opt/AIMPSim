@@ -38,3 +38,6 @@
 .ai-exb{text-align:left;border:1px solid var(--line);background:#fafbfc;border-radius:8px;padding:9px 11px;font-size:12.5px;line-height:1.45;cursor:pointer}
 .ai-exb:hover{border-color:#6aa5ff;background:#f3f8ff}
 @media (max-width:900px){.ai-ex{grid-template-columns:1fr}}
+.ai-card.ai-loopmsg{background:#f5f7fd;border-color:#d3dcf3}
+.ai-card.ai-loop{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;background:#fffaf0;border-color:#efd9a8}
+.ai-card.ai-loop .hint{flex:1 1 260px;font-size:11px}

@@ -21,7 +21,7 @@ sys.path.insert(0, ROOT)
 
 from aimpsim.lexicon import Lexicon  # noqa: E402
 from aimpsim.parser import parse  # noqa: E402
-from aimpsim.planner import Planner  # noqa: E402
+from aimpsim.planner import Planner, merge  # noqa: E402
 
 sys.path.insert(0, HERE)
 from corpus import CASES  # noqa: E402
@@ -205,6 +205,13 @@ def test_reader_checks(lex, host):
           "task": "run"},
          lambda it, rep, r: it.get("matrix") is None and not any(f.get("id") for f in it["fillers"])
          and any(q["id"] in ("matrix", "filler_new") for q in r["questions"]), "an invented material was kept"),
+        # both ends of two sweeps written as two copies of the filler: one filler, both factors
+        ("에폭시에 구형 알루미나 함량 30~55%, 크기 5~30um로 바꿔가며 열전도도 최대 조건 찾아줘, 빠르게",
+         {"matrix": {"material": "epoxy"}, "fillers": [{"material": "al2o3", "percent": 30, "shape": "sphere", "size_um": 5},
+                                                      {"material": "al2o3", "percent": 55, "shape": "sphere", "size_um": 30}],
+          "analyses": ["thermal"], "task": "doe", "settings": {"quality": "fast"}},
+         lambda it, rep, r: len(it["fillers"]) == 1 and sorted(f["what"] for f in it["doe"]["factors"]) == ["content", "size"]
+         and len((r.get("payload") or {}).get("doe", {}).get("parameters", [])) == 2, "a swept filler written twice lost its size sweep"),
         ("에폭시에 알루미나 넣고 열전도도",
          {"matrix": {"material": "epoxy"}, "fillers": [{"material": "al2o3", "percent": 55}], "analyses": ["thermal"],
           "task": "run"},
@@ -416,6 +423,381 @@ def test_model_first(host):
     return errs
 
 
+DESIGN_TEXT = ("10um 두께의 에폭시필름에서 알루미나함량을 가장 낮게하면서 z방향 열전도도를 3w/mk로 할수있는 알루미나의 크기와 "
+               "배합비율을 알려주세요. 알루미나의 크기 topcut은 3um로하고 실제 배합시 점도나 패킹문제가 있을수있어서 비슷한 "
+               "열전도도 수준이라면 점도는 낮고 패킹은 잘되는 조합이면 좋겟어요. 입자 크기 distribution은 고려하지않고 가장 작은 "
+               "입자의 크기는 200nm예요. 예전해석에서 필러-레진, 필러-필러간 열저항은 1E-8을 사용했어요. 필러의 최대함량은 62vol%입니다")
+# (request, expected: task, target (property, op, value, direction), content bounds, size bounds, DOE parameter roles, n cases)
+DESIGN_CASES = [
+    (DESIGN_TEXT, {"target": ("k", ">=", 3.0, "z"), "cmax": 62.0, "size": (0.2, 3.0), "roles": {"content", "share", "size0", "size1"},
+                   "n": 40, "film": 10.0, "r": (1e-8, 1e-8), "mono": True, "prefer": {"low_viscosity", "high_packing"}}),
+    ("In a 10 um thick epoxy film, which alumina sizes and blend give a through-plane k of 3 W/mK with the least filler? "
+     "Topcut 3 um, smallest particle 0.2 um, ignore the size distribution, at most 62 vol%, filler-resin and filler-filler "
+     "resistance 1e-8 m2K/W, prefer low viscosity and good packing",
+     {"target": ("k", ">=", 3.0, "z"), "cmax": 62.0, "size": (0.2, 3.0), "roles": {"content", "share", "size0", "size1"},
+      "n": 40, "film": 10.0, "r": (1e-8, 1e-8), "mono": True, "prefer": {"low_viscosity", "high_packing"}}),
+    # the AI tab's own example
+    ("10um 에폭시 필름에서 알루미나를 가장 적게 넣고 z방향 열전도도 3 W/mK가 되는 크기와 배합비율 알려줘. topcut 3um, 가장 작은 "
+     "입자 200nm, 최대 62vol%, 분포는 고려하지 않음, 필러-레진·필러-필러 열저항 1E-8, 비슷하면 점도 낮고 패킹 잘되는 조합",
+     {"target": ("k", ">=", 3.0, "z"), "cmax": 62.0, "size": (0.2, 3.0), "roles": {"content", "share", "size0", "size1"},
+      "n": 40, "film": 10.0, "r": (1e-8, 1e-8), "mono": True, "prefer": {"low_viscosity", "high_packing"}}),
+    ("실리콘에 구형 질화알루미늄 10um 넣어서 열전도도 5 W/mK 이상 되는 최소 함량 찾아줘. 최대 70vol%",
+     {"target": ("k", ">=", 5.0, None), "cmax": 70.0, "roles": {"content"}, "n": 9}),
+    ("에폭시에 구형 실리카 넣어서 CTE 20ppm/K 이하가 되는 최소 함량과 입자 크기 알려줘. 입자는 1~20um, 최대 65vol%",
+     {"target": ("alpha", "<=", 20.0, None), "cmax": 65.0, "size": (1.0, 20.0), "roles": {"content", "size0"}, "n": 36}),
+]
+NOT_DESIGN = [
+    ("에폭시에 실리카 20%일 때 0.45 W/mK, 40%일 때 0.8 W/mK 측정됐어. 계면저항 보정해줘", "calibration"),
+    ("에폭시에 알루미나 함량을 40~60%로 바꿔가며 열전도도가 최대가 되는 조건 찾아줘", "optimization"),
+    ("에폭시에 알루미나 55% 열전도도 구해줘", None),
+]
+
+
+def test_design(lex, host, read=None):
+    """Design requests ("as little filler as possible for k_z = 3"): read,
+    planned into a DOE MPSim accepts case by case, and the recipe chosen
+    from finished runs (here a closed-form stand-in for the solver)."""
+    import numpy as np
+    from aimpsim import design as DZ
+    errs = []
+    planner = Planner(lex, host)
+    for text, exp in DESIGN_CASES:
+        it = read(text) if read else parse(text, lex)
+        d = it.get("design") or {}
+        tg = (d.get("targets") or [{}])[0]
+        if it.get("task") != "design" or (tg.get("property"), tg.get("op"), tg.get("value"), tg.get("direction")) != exp["target"]:
+            errs.append(f"design read: {text[:40]}: task {it.get('task')} target {tg}")
+            continue
+        if d.get("content_max") != exp["cmax"] or ("size" in exp and (d.get("size_min_um"), d.get("size_max_um")) != exp["size"]):
+            errs.append(f"design bounds: {text[:40]}: {d.get('content_max')} {d.get('size_min_um')} {d.get('size_max_um')}")
+        if "film" in exp and it.get("film") != exp["film"]:
+            errs.append(f"design film: {text[:40]}: {it.get('film')}")
+        if "r" in exp and ((it.get("interface") or {}).get("r_int"), (it.get("interface") or {}).get("r_contact")) != exp["r"]:
+            errs.append(f"design resistances: {text[:40]}: {it.get('interface')}")
+        if exp.get("mono") and not d.get("mono"):
+            errs.append(f"design mono: {text[:40]}")
+        if "prefer" in exp and set(d.get("prefer") or []) != exp["prefer"]:
+            errs.append(f"design prefer: {text[:40]}: {d.get('prefer')}")
+        if any((f.get("content") or {}).get("value") is not None for f in it["fillers"]) or \
+                any((f.get("props") or {}).get("k") for f in it["fillers"]):
+            errs.append(f"design numbers on the filler: {text[:40]}: {[(f.get('content'), f.get('props')) for f in it['fillers']]}")
+        r = planner.resolve(copy.deepcopy(it), {"_auto": True})
+        p = r["payload"]
+        if r["problems"] or not p or p["kind"] != "design":
+            errs.append(f"design plan: {text[:40]}: {r['problems']} {[q['id'] for q in r['questions'] if q['essential']]}")
+            continue
+        roles = set(p["design"]["roles"].values())
+        if roles != exp["roles"] or p["doe"]["n_cases"] != exp["n"]:
+            errs.append(f"design DOE: {text[:40]}: {roles} {p['doe']['n_cases']}")
+        if not host.get("validate"):
+            continue
+        sys.path.insert(0, find_mpsim())
+        from mpsim import doe as DOE
+        from mpsim import spec as S
+        from mpsim.calibrate import fill_props
+        base = fill_props(p["form"])
+        if DOE.check_links(p["doe"]["parameters"], base):
+            errs.append(f"design links: {DOE.check_links(p['doe']['parameters'], base)}")
+        cases = DOE.expand(p["doe"]["parameters"], p["doe"]["design"], p["doe"]["samples"], 1)
+        rows = []
+        for c in cases:
+            fm = DOE.apply_case(base, c, parameters=p["doe"]["parameters"])
+            try:
+                S.normalize(copy.deepcopy(fm))
+            except ValueError as e:
+                errs.append(f"design case refused: {c['label']}: {e}")
+                break
+            ph = fm["phases"]
+            phi = sum(x["fraction"]["value"] for x in ph) / 100.0
+            if "content" in exp["roles"] and abs(100 * phi - c["values"]["phases.0.fraction.value"]) > 1e-6:
+                errs.append(f"design total content: {c['label']} -> {100 * phi}")
+                break
+            deff = sum(x["fraction"]["value"] * x["size"]["d"] for x in ph) / max(100 * phi, 1e-9)
+            k = 0.2 * (1 - phi) ** -3 / (1 + 0.15 / deff)
+            alpha = 60.0 * (1 - phi) ** 1.5
+            rows.append({"state": "done", "values": c["values"], "label": c["label"], "job_id": "x",
+                         "metrics": {"k": k, "alpha": alpha, "real_filler": 100 * phi - 0.2}})
+        out = DZ.recommend({"parameters": p["doe"]["parameters"], "base_form": base}, rows, p["design"])
+        rec = out.get("recommended")
+        if not out.get("ok") or not out.get("reached") or not rec:
+            errs.append(f"design recipe: {text[:40]}: {out.get('error')} reached={out.get('reached')}")
+            continue
+        tgv = exp["target"]
+        if (tgv[1] == ">=" and rec["predicted"] < tgv[2] - 1e-9) or (tgv[1] == "<=" and rec["predicted"] > tgv[2] + 1e-9):
+            errs.append(f"design recipe misses the target: {rec}")
+        low = out.get("lowest")
+        if low and rec["content"] > low["content"] + p["design"]["tol"] + 1e-6:
+            errs.append(f"design recipe beyond the tolerance: {rec['content']} vs {low['content']}")
+        if p["design"]["prefer"] and low and rec.get("mu_r") is not None and low.get("mu_r") is not None \
+                and rec["mu_r"] > low["mu_r"] + 1e-9:
+            errs.append(f"design recipe not the lowest viscosity: {rec['mu_r']} > {low['mu_r']}")
+        try:
+            S.normalize(copy.deepcopy(out["check_form"]))
+        except (KeyError, ValueError) as e:
+            errs.append(f"design check run refused: {e}")
+        if p["design"]["check_analyses"] and not all(out["check_form"]["analyses"].get(a) for a in p["design"]["check_analyses"]):
+            errs.append(f"design check run without {p['design']['check_analyses']}")
+        if not np.isfinite(rec["predicted"]):
+            errs.append("design prediction not finite")
+    for text, task in NOT_DESIGN:
+        it = read(text) if read else parse(text, lex)
+        if it.get("task") != task:
+            errs.append(f"not a design: {text[:40]} -> {it.get('task')}")
+    # a follow-up changes the bound
+    it = merge(parse(DESIGN_TEXT, lex), parse("최대 함량은 60vol%로 바꿔줘", lex))
+    r = planner.resolve(it, {"_auto": True})
+    cp = next((x for x in (r["payload"] or {}).get("doe", {}).get("parameters", []) if x["path"] == "phases.0.fraction.value"), None)
+    if not cp or cp["max"] != 60.0:
+        errs.append(f"design follow-up: {cp}")
+    # a size that varies: each case its own grid (a voxel set stays, the edge per case); no size: one grid
+    for text, edge in ((DESIGN_TEXT, "own"),
+                       ("에폭시에 구형 알루미나 함량 30~55%, 크기 5~30um로 바꿔가며 열전도도 최대 조건 찾아줘, 빠르게", "own"),
+                       ("에폭시에 구형 알루미나 10um 함량 30~55%로 바꿔가며 열전도도 최대 조건 찾아줘, 빠르게", "fixed"),
+                       ("에폭시에 구형 알루미나 50% 크기 5~30um, 복셀 0.5um, 열전도도", "adaptive")):
+        d = (planner.resolve(parse(text, lex), {"_auto": True})["payload"] or {}).get("doe") or {}
+        if d.get("edge") != edge:
+            errs.append(f"study grid: {d.get('edge')} != {edge}: {text[:40]}")
+    return errs
+
+
+MATPROP_CASES = [
+    ("에폭시에 구형 알루미나 10um 50vol%, 알루미나 열전도도는 20 W/mK로 해서 열전도도 계산해줘", "al2o3", "k", 20.0),
+    ("에폭시에 구형 알루미나 10um 50vol%, 알루미나 k를 라이브러리보다 10 낮게 해서 열전도도", "al2o3", "k", "lib-10"),
+    ("epoxy with 50 vol% alumina spheres 10 um, use k = 20 W/mK for the alumina this time, thermal conductivity", "al2o3", "k", 20.0),
+    ("실리콘에 판상 BN 10um 30vol%, BN 열전도도를 기존보다 30% 높게 해서 열전도도", "hbn", "k", "lib*1.3"),
+    ("에폭시에 구형 알루미나 10um 50vol%, 알루미나 열전도도 절반으로 해서 열전도도", "al2o3", "k", "lib*0.5"),
+    ("에폭시 열전도도 0.3으로 두고 구형 알루미나 5um 50vol% 열전도도", "epoxy", "k", 0.3),
+]
+
+
+def test_matprops(lex, host):
+    """A material value said for one request ("알루미나 열전도도 20으로",
+    "라이브러리보다 10 낮게"): in the case's phase only, never in the library,
+    and gone from the next request."""
+    errs = []
+    planner = Planner(lex, host)
+    lib = {m["id"]: dict(m.get("props") or {}) for m in host.get("library") or []}
+    for text, mid, prop, want in MATPROP_CASES:
+        r = planner.resolve(parse(text, lex), {"_auto": True})
+        if not r["payload"]:
+            errs.append(f"values: no payload: {text[:40]} {r['problems']}")
+            continue
+        f = r["payload"]["form"]
+        ent = f["matrix"] if f["matrix"]["material_id"] == mid else next((p for p in f["phases"] if p["material_id"] == mid), {})
+        base = lib.get(mid, {}).get(prop)
+        exp = want if isinstance(want, float) else base - 10 if want == "lib-10" else base * float(want.split("*")[1])
+        got = (ent.get("props") or {}).get(prop)
+        if got is None or abs(got - exp) > 1e-9 * max(1.0, abs(exp)):
+            errs.append(f"values: {text[:40]}: {prop} = {got}, expected {exp}")
+        if not any("라이브러리는 바꾸지 않음" in n or "library is not changed" in n for n in r["notes"]):
+            errs.append(f"values: no note that only this request uses it: {text[:40]}")
+        # the next request starts from the library
+        r2 = planner.resolve(parse("에폭시에 구형 알루미나 10um 50vol% 열전도도", lex), {"_auto": True})
+        k2 = (r2["payload"]["form"]["phases"][0].get("props") or {}).get("k")
+        if k2 is not None:
+            errs.append(f"values: carried into the next request: {k2}")
+    if {m["id"]: dict(m.get("props") or {}) for m in host.get("library") or []} != lib:
+        errs.append("values: the library itself was changed")
+    return errs
+
+
+def test_calibration_ai(lex, host):
+    """A calibration the AI looks at: data no interfacial resistance can
+    reach get the unknowns that can (pre-selected, the request's own kept as
+    a choice); data it can reach run as asked; after a run, a result that
+    did not reach the data gives the next calibration, one that did ends."""
+    errs = []
+    if not host.get("validate"):
+        return errs
+    from aimpsim import calcheck as CC
+    planner = Planner(lex, host)
+    # silica: 0.8 W/mK at 40 vol% is above the parallel bound with fused silica (0.67)
+    r = planner.resolve(parse("에폭시에 실리카 20%일 때 0.45 W/mK, 40%일 때 0.8 W/mK 측정됐어. 계면저항 보정해줘", lex), {"_auto": True})
+    cal = (r["payload"] or {}).get("cal") or {}
+    keys = sorted(u.get("key") for u in cal.get("unknowns") or [])
+    if keys != ["filler_k", "matrix_k"] or not any(q["id"] == "cal_plan" for q in r["questions"]):
+        errs.append(f"calibration precheck (silica): {keys} {[q['id'] for q in r['questions']]}")
+    if not any(row["k"] in ("사전 점검", "Precheck") and "병렬 상한" in row["v"] for row in r["summary"]):
+        errs.append("calibration precheck (silica): no bound in the summary")
+    # the request's own unknowns stay a choice
+    r2 = planner.resolve(parse("에폭시에 실리카 20%일 때 0.45 W/mK, 40%일 때 0.8 W/mK 측정됐어. 계면저항 보정해줘", lex),
+                         {"_auto": True, "cal_plan": "r_int"})
+    if [u.get("key") for u in r2["payload"]["cal"]["unknowns"]] != ["r_int"]:
+        errs.append("calibration precheck: the request's own unknowns could not be kept")
+    # alumina: R_int reaches the data, it runs as asked
+    r3 = planner.resolve(parse("에폭시에 구형 알루미나 10um 30%일 때 0.55 W/mK, 50%일 때 1.2 W/mK 측정됐어. 계면저항 보정해줘", lex),
+                         {"_auto": True})
+    u3 = r3["payload"]["cal"]["unknowns"]
+    if [u.get("key") for u in u3] != ["r_int"] or any(q["id"] == "cal_plan" for q in r3["questions"]) \
+            or u3[0]["links"] != [{"path": "phases.0.r_contact", "expr": "2*x"}]:
+        errs.append(f"calibration precheck (alumina): {u3}")
+    # after a run: R_int at its lower end and far below the data -> other unknowns; a reached result ends
+    form = planner._filled(r2["payload"]["form"])
+    cal2 = r2["payload"]["cal"]
+    res = {"unknowns": [{"path": "phases.0.r_int", "label": "R_int", "map": 1.5e-9, "lo": 1e-9, "hi": 1e-5, "edge": "low",
+                         "unreached": True, "unit": "m²K/W"}],
+           "measurements": [{"label": "20%", "measured": 0.45, "direct": 0.294, "residual_sigma": -8.0},
+                            {"label": "40%", "measured": 0.8, "direct": 0.428, "residual_sigma": -11.9}]}
+    nx = CC.next_round(form, cal2, cal2["unknowns"], res, ["r_int"], "ko")
+    if nx["action"] != "rerun" or "r_int" in (nx.get("keys") or "").split("+") and nx.get("why") != "widened" \
+            or not CC.explain(nx, cal2["unknowns"], res, "ko"):
+        errs.append(f"calibration next round: {nx.get('action')} {nx.get('keys')} {nx.get('why')}")
+    res_ok = {"unknowns": [{"path": "phases.0.props.k", "label": "silica k", "map": 6.39, "lo": 0.69, "hi": 41.4, "edge": None,
+                            "unit": "W/m·K"}],
+              "measurements": [{"label": "20%", "measured": 0.45, "direct": 0.449, "residual_sigma": -0.05}]}
+    done = CC.next_round(form, cal2, cal2["unknowns"], res_ok, [], "ko")
+    if done["action"] != "done" or "결정질 실리카" not in CC.explain(done, cal2["unknowns"], res_ok, "ko", form, lex.library) \
+            and "quartz" not in CC.explain(done, cal2["unknowns"], res_ok, "ko", form, lex.library):
+        errs.append(f"calibration done: {done} / {CC.explain(done, cal2['unknowns'], res_ok, 'ko', form, lex.library)}")
+    return errs
+
+
+def test_loops(lex, host):
+    """Studies and calibrations run until they answer (loop.py, calcheck.py),
+    on synthetic data: the design loop under run-to-run noise ends with a
+    recipe that meets the target; the optimisation loop ends at the optimum;
+    a calibration with nothing left to try asks, and an answer changes the
+    case; words typed during a loop are read as stop, answer or condition."""
+    errs = []
+    if not host.get("validate"):
+        return errs
+    import numpy as np
+    sys.path.insert(0, find_mpsim())
+    from mpsim import doe as DOE
+    from mpsim.calibrate import fill_props
+    from aimpsim import calcheck as CC
+    from aimpsim import loop as LP
+    planner = Planner(lex, host)
+    for text, noise in ((DESIGN_TEXT, 0.12), ("에폭시에 구형 알루미나 20um 넣어서 열전도도 1 W/mK 이상 되는 최소 함량 찾아줘. 최대 50vol%, 빠르게", 0.06)):
+        p = planner.resolve(parse(text, lex), {"_auto": True})["payload"]
+        base, params = fill_props(p["form"]), p["doe"]["parameters"]
+        rng = np.random.default_rng(7)
+
+        def k_of(values):
+            f = DOE.apply_case(base, {"values": values, "label": ""}, parameters=params)
+            ph = f["phases"]
+            phi = sum(x["fraction"]["value"] for x in ph) / 100
+            deff = sum(x["fraction"]["value"] * x["size"]["d"] for x in ph) / max(100 * phi, 1e-9)
+            return 0.2 * (1 - phi) ** -3 / (1 + 0.15 / deff)
+        rows = [{"state": "done", "values": c["values"], "label": c["label"], "job_id": "x",
+                 "metrics": {"k": k_of(c["values"]) * (1 + noise * rng.standard_normal())}}
+                for c in DOE.expand(params, p["doe"]["design"], p["doe"]["samples"], 1)]
+        state, final, short = {}, None, None
+        for _ in range(LP.MAX_ROUNDS + 2):
+            out = LP.design_round({"parameters": params, "base_form": base}, rows, p["design"], state)
+            state = out.get("state") or state
+            if not LP.explain(out, "design", "ko"):
+                errs.append("loop: no words for a round")
+            if out["action"] == "refine":
+                rows += [{"state": "done", "values": v, "label": "added", "job_id": "x",
+                          "metrics": {"k": k_of(v) * (1 + noise * rng.standard_normal())}} for v in out["points"]]
+            elif out["action"] == "check":
+                v = state["check"]["values"]
+                if short is not None and all(abs(v[q] - short[q]) < 1e-9 for q in v):
+                    errs.append(f"design loop checks a recipe again that fell short: {v}")
+                seeds = [k_of(v) * (1 + noise * rng.standard_normal()) for _ in range(3)]
+                state["check"].update(value=float(np.mean(seeds)), ci=float(np.std(seeds)))
+                tgt = p["design"]["target"]["value"]
+                short = dict(v) if state["check"]["value"] < tgt else None
+            else:
+                final = out
+                break
+        # a check that falls short joins the data before the recipe is chosen again
+        if final and final["action"] == "done":
+            st = dict(final["state"], check=dict(final["state"]["check"], value=0.5 * p["design"]["target"]["value"]))
+            o2 = LP.design_round({"parameters": params, "base_form": base}, rows, p["design"], st)
+            if o2.get("why_check") != "check_short" or not any(e.get("label") == "check" for e in o2["state"].get("extra") or []):
+                errs.append(f"design loop: a short check was not taken into the data first ({o2.get('action')} {o2.get('why_check')})")
+        if not final or final["action"] != "done":
+            errs.append(f"design loop did not finish: {text[:30]} {final and final.get('why')}")
+            continue
+        rec = final["result"]["recommended"]
+        target = p["design"]["target"]["value"]
+        if k_of(rec["values"]) < 0.97 * target:
+            errs.append(f"design loop recipe misses the target: {k_of(rec['values']):.3f} < {target}")
+    # optimisation: k rises with the content and falls with a small size; the optimum is the corner.
+    # Two factors, and one (its runs fill the line at the points' spacing after a round); a rise
+    # with a peak inside the range, brought to a value; the optimum is run before it stands
+    def k2(v):
+        phi = v.get("phases.0.fraction.value", 40) / 100
+        d = v.get("phases.0.size.d", 10)
+        return 0.2 * (1 - phi) ** -3 / (1 + 2.0 / d)
+
+    def peak(v):
+        phi = v.get("phases.0.fraction.value", 40)
+        return 3.0 - 0.004 * (phi - 47.0) ** 2
+
+    def no_size(v):                  # no interfacial resistance: the size does not matter
+        return 0.2 * (1 - v.get("phases.0.fraction.value", 40) / 100) ** -3
+    two = "에폭시에 구형 알루미나 함량 30~55%, 크기 5~30um로 바꿔가며 열전도도 최대 조건 찾아줘, 빠르게"
+    for text, f, goal, target, ok in (
+            (two, k2, "max", None,
+             lambda b: b["values"].get("phases.0.fraction.value", 0) >= 52),
+            (two, no_size, "max", None,
+             lambda b: b["values"].get("phases.0.fraction.value", 0) >= 52),
+            ("에폭시에 구형 알루미나 10um 함량 30~55%로 바꿔가며 열전도도 최대 조건 찾아줘, 빠르게", k2, "max", None,
+             lambda b: b["values"].get("phases.0.fraction.value", 0) >= 52),
+            ("에폭시에 구형 알루미나 10um 함량 30~55%로 바꿔가며 열전도도 최대 조건 찾아줘, 빠르게", peak, "max", None,
+             lambda b: abs(b["values"].get("phases.0.fraction.value", 0) - 47.0) <= 2.0),
+            ("에폭시에 구형 알루미나 10um 함량 30~55%로 바꿔가며 열전도도 최대 조건 찾아줘, 빠르게", k2, "target", 1.0,
+             lambda b: abs(k2(b["values"]) - 1.0) <= 0.05)):
+        p = planner.resolve(parse(text, lex), {"_auto": True})["payload"]
+        params = p["doe"]["parameters"]
+        rng = np.random.default_rng(3)
+        cases = DOE.expand(params, p["doe"]["design"], p["doe"]["samples"], 1)
+        rows = [{"state": "done", "values": c["values"], "label": c["label"], "job_id": "x",
+                 "metrics": {"k": f(c["values"]) * (1 + 0.03 * rng.standard_normal())}} for c in cases]
+        state, final, seen = {}, None, []
+        for _ in range(LP.MAX_ROUNDS + 2):
+            out = LP.opt_round({"parameters": params}, rows, "k", goal, target, state)
+            state = out.get("state") or state
+            seen.append((out["action"], out.get("why")))
+            if not LP.explain(out, "opt", "ko"):
+                errs.append("loop: no words for an optimisation round")
+            if out["action"] in ("refine", "check"):
+                rows += [{"state": "done", "values": v, "label": "added", "job_id": "x",
+                          "metrics": {"k": f(v) * (1 + 0.03 * rng.standard_normal())}} for v in out["points"]]
+            else:
+                final = out
+                break
+        if not final or final["action"] != "done" or "measured" not in final["best"] or not ok(final["best"]):
+            errs.append(f"optimisation loop ({len(params)} factor(s), {f.__name__}, {goal}): "
+                        f"{final and final.get('action')} {final and final.get('why')} {final and final.get('best')} {seen}")
+        elif len(params) == 2:
+            # a size that does not matter is said so; one that does is not
+            flat = [x["path"] for x in final.get("flat") or []]
+            if ("phases.0.size.d" in flat) != (f is no_size) or "phases.0.fraction.value" in flat:
+                errs.append(f"optimisation loop ({f.__name__}): factors within the scatter {flat}")
+    # a calibration with nothing left to try asks; an answer changes the material
+    r = planner.resolve(parse("에폭시에 실리카 20%일 때 3 W/mK, 40%일 때 5 W/mK 측정됐어. 계면저항 보정해줘", lex), {"_auto": True})
+    form, cal = planner._filled(r["payload"]["form"]), r["payload"]["cal"]
+    res = {"unknowns": [{"path": u["path"], "label": u["label"], "map": u["lo"], "lo": u["lo"], "hi": u["hi"], "edge": None,
+                         "unreached": True, "unit": u.get("unit", "")} for u in cal["unknowns"]],
+           "measurements": [{"label": "20%", "measured": 3.0, "direct": 0.45, "residual_sigma": -20},
+                            {"label": "40%", "measured": 5.0, "direct": 0.8, "residual_sigma": -20}]}
+    tried = ["+".join(p_) for p_ in CC.PLANS] + [cal.get("plan_keys") or ""]
+    nx = CC.next_round(form, cal, cal["unknowns"], res, tried, "ko", lex.library)
+    ids = [o["id"] for o in nx.get("options") or []]
+    if nx["action"] != "ask" or "material:quartz" not in ids or "basis:wt" not in ids or "stop" not in ids:
+        errs.append(f"calibration ask: {nx.get('action')} {ids}")
+    f2, _ = CC.apply_answer(form, cal, "material:quartz", lex.library)
+    if f2["phases"][0]["material_id"] != "quartz" or abs(f2["phases"][0]["props"]["k"] - 6.5) > 1e-9:
+        errs.append(f"calibration answer: {f2['phases'][0].get('material_id')}")
+    from aimpsim.web import Assistant
+    a = Assistant(host)
+    # (loop words are read by rules; the model is not needed)
+    for text, kind, waiting, want in (
+            ("멈춰", "design", False, "stop"), ("stop it", "cal", False, "stop"), ("결정질 실리카로 해봐", "cal", True, "answer"),
+            ("결정질 실리카로 해봐", "cal", False, "none"), ("최대 함량은 55%로", "design", False, "condition"),
+            ("1% 이내면 같은 걸로", "design", False, "condition"), ("에폭시에 알루미나 50% 열전도도", "design", False, "none"),
+            # a whole new request typed while a calibration waits is a request, not an answer
+            ("에폭시에 구형 알루미나 20um 넣어서 열전도도 1 W/mK 이상 되는 최소 함량 찾아줘", "cal", True, "none")):
+        c = a.loop_command(text, [kind], "ko", waiting)
+        if c["command"] != want:
+            errs.append(f"loop words: {text} -> {c}")
+    return errs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="")
@@ -472,7 +854,7 @@ def main():
             if r["problems"]:
                 badval += 1
                 print(f"MPSIM {text}\n      {r['problems']}")
-    llm_errs, conv_errs = [], []
+    llm_errs, conv_errs, des_errs = [], [], []
     if not a.only:
         llm_errs = test_reader_checks(lex, host) + test_model_first(host)
         for e in llm_errs:
@@ -480,11 +862,15 @@ def main():
         conv_errs = test_conversation(host)
         for e in conv_errs:
             print("CONV  " + e)
+        des_errs = test_design(lex, host, read) + test_matprops(lex, host) + test_calibration_ai(lex, host) + test_loops(lex, host)
+        for e in des_errs:
+            print("DESIGN " + e)
     print(f"\n{n - bad}/{n} requests read as expected"
           + (f"; {nval - badval}/{nval} payloads accepted by MPSim ({app})" if nval else "")
           + ("" if a.only else f"; conversation {'passed' if not conv_errs else 'FAILED'}"
-             f"; local-model adapter {'passed' if not llm_errs else 'FAILED'}"))
-    return 1 if bad or badval or llm_errs or conv_errs else 0
+             f"; local-model adapter {'passed' if not llm_errs else 'FAILED'}"
+             f"; design, material values, calibration checks and loops {'passed' if not des_errs else 'FAILED'}"))
+    return 1 if bad or badval or llm_errs or conv_errs or des_errs else 0
 
 
 if __name__ == "__main__":

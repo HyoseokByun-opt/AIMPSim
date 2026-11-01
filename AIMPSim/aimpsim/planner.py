@@ -19,6 +19,9 @@ import copy
 import math
 import re
 
+from . import calcheck as CC
+from . import design as DZ
+from . import matprops as MP
 from .lang import AN_NAME, QUALITY_NAME, SHAPE_NAME, SRC, TASK_NAME, name, t
 from .numbers import as_content, quantities, to_um
 from .reader import COMPARE, MIXED
@@ -66,6 +69,13 @@ class Planner:
         lang = it["lang"]
         auto = bool(it.get("auto") or ans.get("_auto"))
         Q, notes, problems = [], [], []
+        # a design finds the content and the sizes: they are not asked
+        dz = it.get("design") if it.get("task") == "design" else None
+        if dz and ans.get("design_target"):
+            more = DZ.read(str(ans["design_target"]))
+            if more.get("targets"):
+                dz = dict(dz, targets=more["targets"])
+        find = set((dz or {}).get("find") or [])
 
         def ask(qid, text, options=None, essential=True, default=None, free=True, multi=False):
             if qid in ans and ans[qid] not in (None, ""):
@@ -89,12 +99,11 @@ class Planner:
             ask("matrix", t("q_matrix", lang), [opt(c, self.mname(c), self.mname(c), c == "epoxy") for c in MATRIX_CHOICES])
 
         mprops = (mx or {}).get("props") if matrix_id and (mx or {}).get("id") == matrix_id else None
-        if mprops:
-            lib = self.props(matrix_id)
-            notes.append(_lab(lang, f"{self.mname(matrix_id)}: " + ", ".join(
-                f"{k} = {v:g} {PROP_UNIT.get(k, '')} (입력값, 라이브러리 {lib.get(k, '-')})" for k, v in mprops.items()),
-                f"{self.mname(matrix_id)}: " + ", ".join(f"{k} = {v:g} {PROP_UNIT.get(k, '')} (your value; library {lib.get(k, '-')})"
-                                                         for k, v in mprops.items())))
+        if matrix_id:
+            mprops, how = self._said_values(matrix_id, mprops, it)
+            it["_matrix_props"] = mprops
+            if mprops:
+                notes.append(self._values_note(self.mname(matrix_id), matrix_id, mprops, how, lang))
         rep_ = it.get("llm_report") or {}
         for what, a, b in rep_.get("differs") or []:
             if what == "matrix":
@@ -113,6 +122,9 @@ class Planner:
                                   + " (AI는 " + ", ".join(name(AN_NAME, k, "ko") for k in a) + ")",
                                   "the analyses named in the sentence: " + ", ".join(name(AN_NAME, k, "en") for k in b)
                                   + " (the AI read " + ", ".join(name(AN_NAME, k, "en") for k in a) + ")"))
+            elif what == "filler_swapped":
+                notes.append(_lab(lang, f"AI가 '{a}'(으)로 읽었으나 문장의 재료는 {self.mname(b)}: {self.mname(b)}로 씀",
+                                  f"the AI read '{a}'; the sentence names {self.mname(b)}, which is used"))
             elif what == "filler_removed":
                 notes.append(_lab(lang, f"AI 판단: {self.mname(a)}은(는) 넣지 않음 (빼거나 바꾼다고 읽음)",
                                   f"AI reading: no {self.mname(a)} (read as taken back or replaced)"))
@@ -168,7 +180,7 @@ class Planner:
                 notes.append(_lab(lang, f"{fname} 함량 {c['value']:g}%는 0과 100 사이가 아니어서 다시 묻습니다",
                                   f"{fname}: a content of {c['value']:g}% is not between 0 and 100 - asked again"))
                 c = None
-            if c is None:
+            if c is None and not (dz and "content" in find):
                 ask(f"content:{i}", t("q_content", lang, name=fname))
             f["content"] = c
             # shape
@@ -192,7 +204,9 @@ class Planner:
                 size = self._size_answer(ans[f"size:{i}"])
             if size is None and s.get("size_um"):
                 size, zsrc = s["size_um"], "text"
-            if size is None:
+            if size is None and dz and ("size" in find or ("ratio" in find and len({x.get("id") for x in slots}) == 1)):
+                zsrc = "design"
+            elif size is None:
                 if auto or (fid and self.lex.is_void(fid)):
                     size, zsrc = DEFAULT_SIZE_UM, "auto"
                 else:
@@ -203,12 +217,10 @@ class Planner:
             f["size_um"], f["size_src"] = size, zsrc
             for k in ("aspect", "length_um", "thickness_um", "std_um", "cv", "size_range", "size_levels", "props"):
                 f[k] = s.get(k)
-            if f.get("props") and fid:
-                lib = self.props(fid)
-                notes.append(_lab(lang, f"{fname}: " + ", ".join(
-                    f"{k} = {v:g} {PROP_UNIT.get(k, '')} (입력값, 라이브러리 {lib.get(k, '-')})" for k, v in f["props"].items()),
-                    f"{fname}: " + ", ".join(f"{k} = {v:g} {PROP_UNIT.get(k, '')} (your value; library {lib.get(k, '-')})"
-                                             for k, v in f["props"].items())))
+            if fid:
+                f["props"], how = self._said_values(fid, f.get("props"), it)
+                if f["props"]:
+                    notes.append(self._values_note(fname, fid, f["props"], how, lang))
             fl.append(f)
 
         # ---- a comparison of alternatives: each on its own, never one mixture ----
@@ -329,9 +341,21 @@ class Planner:
             unk = list(it.get("calibration", {}).get("unknowns") or [])
             if ans.get("cal_unknowns"):
                 unk = ans["cal_unknowns"] if isinstance(ans["cal_unknowns"], list) else [ans["cal_unknowns"]]
+            mprop = next((m.get("property") for m in meas if m.get("property")), "k")
+            # a value of another property than the one measured cannot be fitted to it ("실리카 CTE"
+            # with conductivities measured): kept only when its property is measured
+            unk = [u for u in unk if not re.match(r"(?:filler|matrix)_", u)
+                   or re.match(r"(?:filler|matrix)_(.+?)(?:@\d+)?$", u).group(1) in {m.get("property") for m in meas} | {None}]
+            if mprop != "k" and any(u in ("r_int", "r_contact") for u in unk):
+                # MPSim's interface and contact resistances act on the heat flow only (the thermal solve)
+                unk = [u for u in unk if u not in ("r_int", "r_contact")]
+                notes.append(_lab(lang, f"계면·접촉 열저항은 열전도 해석에만 쓰여 {mprop} 측정으로는 보정할 수 없어, 그 물성을 정하는 재료값을 "
+                                        f"보정합니다", f"interface and contact resistances act on the heat flow only, so {mprop} data "
+                                                       f"cannot fit them: the material value that property depends on is fitted"))
             if not unk:
-                if auto:
-                    unk = ["r_int"]
+                dflt = CC.DEFAULT_UNKNOWN.get(mprop, "r_int")
+                if auto or mprop != "k":
+                    unk = [dflt]
                 else:
                     ask("cal_unknowns", t("q_cal_unknowns", lang),
                         [opt("r_int", "필러-수지 계면저항 (R_int)", "filler-matrix interface resistance (R_int)", True),
@@ -340,6 +364,11 @@ class Planner:
                         essential=False, default="r_int", multi=True, free=False)
                     unk = ["r_int"]
             cal = {"measurements": meas, "unknowns": unk}
+        dplan = None
+        if task == "design":
+            dplan = self._design_plan(it, dz, fl, an, ans, auto, lang, ask, opt, notes, problems)
+            if dplan:
+                doe = dplan["doe"]
 
         # ---- film and pores ----
         film_um = it.get("film") or (self._size_answer(ans["film"]) if ans.get("film") else None)
@@ -360,7 +389,7 @@ class Planner:
                     Q[:] = [q for q in Q if q["id"] != "pores"]
 
         # ---- accuracy level and parallel ----
-        n_cases = self._n_cases(doe) if doe else 1
+        n_cases = (dplan["n_cases"] if dplan else self._n_cases(doe)) if doe else 1
         quality, qsrc, qwhy = ans.get("quality"), "answer", ""
         if not quality and it.get("quality"):
             quality, qsrc = it["quality"], "text"
@@ -404,10 +433,16 @@ class Planner:
         for r_ in (it.get("llm_report") or {}).get("restored") or []:
             notes.append(_lab(lang, f"모델이 빠뜨려 규칙으로 보충: {r_}", f"left out by the model, kept from the rules: {r_}"))
         summary = self._summary(it, lang, task, matrix_id, matrix_src, fl, an, quality, qsrc, qwhy, par, psrc,
-                                rec_par_txt, doe, cal, optz, film_um, notes, n_cases)
-        if not open_essential and matrix_id and fl and all(f["id"] and f["content"] for f in fl):
+                                rec_par_txt, None if dplan else doe, cal, optz, film_um, notes, n_cases)
+        if dplan:
+            at = next((k for k, r in enumerate(summary) if r.get("k") in ("해석", "Analyses")), len(summary))
+            summary[at:at] = self._design_rows(dplan, film_um, lang)
+        complete = all(f["id"] and f["content"] for f in fl) or (dplan is not None and all(f["id"] for f in fl))
+        if not open_essential and matrix_id and fl and complete:
             try:
-                if compare:
+                if dplan:
+                    payload = self._payload_design(it, lang, matrix_id, fl, an, quality, par, dplan, film_um)
+                elif compare:
                     # one run per alternative, queued one after the other
                     runs = [self._payload(it, lang, task, matrix_id, [f], an, quality, par, doe, cal, optz, film_um)
                             for f in fl]
@@ -424,12 +459,28 @@ class Planner:
                     if err:
                         problems.append(err)
                         break
+            if payload is not None and payload.get("cal"):
+                # the unknowns by name and range, not by key
+                for r in summary:
+                    if r.get("k") in ("보정 대상", "Calibrated"):
+                        r["v"] = "; ".join(f"{u.get('label') or u['path']} {u['lo']:.3g}~{u['hi']:.3g} {u.get('unit', '')}".strip()
+                                           for u in payload["cal"]["unknowns"])
+            if payload is not None and payload.get("cal") and not problems:
+                # what the measurements allow, before any RVE is solved (calcheck.py)
+                self._cal_precheck(payload, ans, lang, ask, opt, summary)
             if payload is not None and self.host.get("plan") and not problems:
                 try:
                     pl = self.host["plan"](payload["form"])
                     at = next((k for k, r in enumerate(summary) if r.get("key") == "quality"), len(summary) - 1)
                     summary.insert(at + 1, self._plan_row(pl, lang))
                     payload["plan"] = {k: pl.get(k) for k in ("N", "h_um", "L_um", "memory_gb", "film", "Nz")}
+                    if dplan:
+                        # the largest case of the study: the finest particles beside the coarsest, at the most filler
+                        big = self.host["plan"](self._corner_form(payload, dplan))
+                        row = self._plan_row(big, lang)
+                        row["k"] = _lab(lang, "가장 무거운 조합(범위 끝)", "Heaviest corner")
+                        summary.insert(at + 2, row)
+                        payload["plan_largest"] = {k: big.get(k) for k in ("N", "h_um", "L_um", "memory_gb", "film", "Nz")}
                 except Exception as e:                                     # noqa: BLE001
                     problems.append(str(e))
         return {"questions": Q, "summary": summary, "payload": payload, "problems": problems, "notes": notes,
@@ -473,14 +524,14 @@ class Planner:
         loadings; Accurate (10 diameters) is the level for dense,
         high-contrast fillers. A study of many cases is kept at Standard (or
         Fast beyond 30 cases) so that it finishes."""
-        if not fl or not matrix_id or not all(f.get("id") and f.get("content") for f in fl):
-            return "standard", ""
-        phi = self.phi(fl, matrix_id)
-        a = self.contrast(fl, matrix_id, an)
         if n_cases >= 30:
             return "fast", _lab(lang, f"케이스 {n_cases}개 - 빠른 스크리닝", f"{n_cases} cases - a fast screen")
         if n_cases >= 10:
             return "standard", _lab(lang, f"케이스 {n_cases}개 - 표준", f"{n_cases} cases - standard")
+        if not fl or not matrix_id or not all(f.get("id") and f.get("content") for f in fl):
+            return "standard", ""
+        phi = self.phi(fl, matrix_id)
+        a = self.contrast(fl, matrix_id, an)
         if phi >= 0.45 and a >= 30:
             return "accurate", _lab(lang, f"고충진({100 * phi:.0f} vol%)·고대비(물성비 {a:.0f}) - 결과가 배치에 민감",
                                     f"dense ({100 * phi:.0f} vol%) and high contrast (ratio {a:.0f}) - sensitive to the arrangement")
@@ -616,12 +667,19 @@ class Planner:
               "fraction": {"value": round(float(f["content"]["value"]), 4), "basis": f["content"].get("basis") or "vol"},
               "orientation": {"mode": f.get("orientation") or "iso", "spread_deg": 0}}
         if f.get("props"):
+            # this request's values in this case only: the library entry is not changed
             ph["props"] = dict(self.props(f["id"]), **f["props"])
+            ph["name"] += " · " + ", ".join(f"{k} {v:g}" for k, v in f["props"].items())
         return ph
 
-    def _payload(self, it, lang, task, matrix_id, fl, an, quality, par, doe, cal, optz, film_um):
+    def _payload(self, it, lang, task, matrix_id, fl, an, quality, par, doe, cal, optz, film_um, phases=None):
         dw = (it.get("dist") or {}).get("type")
-        phases = [self._phase(f, lang, dw) for f in fl]
+        phases = phases or [self._phase(f, lang, dw) for f in fl]
+        # interface resistances said for the fillers ("필러-레진, 필러-필러 1E-8") hold for every one of them
+        for p in phases:
+            for k, v in (it.get("interface") or {}).items():
+                if v is not None and k in ("r_int", "r_contact"):
+                    p[k] = float(v)
         orient = it.get("orientation")
         for p, f in zip(phases, fl):
             if orient and f["shape"] in ("platelet", "fiber", "spheroid"):
@@ -647,9 +705,11 @@ class Planner:
         if film_um:
             rve.update(film=True, T_um=float(film_um))
         mx = {"material_id": matrix_id}
-        mp_ = (it.get("matrix") or {}).get("props") if (it.get("matrix") or {}).get("id") == matrix_id else None
+        mp_ = it.get("_matrix_props")
         if mp_:
+            # this request's values in this case only: the library entry is not changed
             mx["props"] = dict(self.props(matrix_id), **mp_)
+            mx["name"] = self.mname(matrix_id) + " · " + ", ".join(f"{k} {v:g}" for k, v in mp_.items())
         form = {"name": "AI · " + name_, "matrix": mx, "phases": phases, "rve": rve,
                 "analyses": {k: True for k in an}, "options": {"directions": "zxy" if dirs == "xyz" else dirs}}
         out = {"kind": task, "form": form}
@@ -682,7 +742,8 @@ class Planner:
             if n > DOE_MAX:
                 design = "lhs"
             out["doe"] = {"name": form["name"] + " · DOE", "design": design, "samples": min(DOE_MAX, 32),
-                          "parameters": params, "edge": "fixed", "n_cases": n if design == "full" else min(DOE_MAX, 32)}
+                          "parameters": params, "edge": self._edge(it, params),
+                          "n_cases": n if design == "full" else min(DOE_MAX, 32)}
         if cal:
             i = 0
             ms = []
@@ -690,19 +751,401 @@ class Planner:
                 st = []
                 if m.get("content") is not None:
                     st.append({"path": f"phases.{i}.fraction.value", "value": m["content"]})
+                # the direction it was measured in: in-plane ("면내 열전도도") along x, otherwise through the thickness
                 ms.append({"label": (f"{m['content']:g}%" if m.get("content") is not None else "sample"),
-                           "property": m["property"], "direction": "z", "value": m["value"], "unc": 5, "set": st})
-            paths = []
-            for u in cal["unknowns"]:
-                paths.append({"r_int": f"phases.{i}.r_int", "r_contact": f"phases.{i}.r_contact",
-                              "filler_k": f"phases.{i}.props.k"}.get(u, u))
-            out["cal"] = {"name": form["name"] + " · calibration", "measurements": ms, "unknowns": paths}
+                           "property": m["property"], "direction": "x" if it.get("directions") == "x" else "z",
+                           "value": m["value"], "unc": 5, "set": st})
+            # each unknown with its range (the calibration tab's defaults), R_c following R_int on touching particles
+            filled = self._filled(form)
+            paths = [CC.unknown_entry(u, filled, i) or {"path": u, "lo": 1e-9, "hi": 1e-5, "scale": "log", "links": []}
+                     for u in cal["unknowns"]]
+            if any(u.get("key") == "r_contact" for u in paths):
+                for u in paths:
+                    if u.get("key") == "r_int":
+                        u["links"] = []
+            out["cal"] = {"name": form["name"] + " · calibration", "measurements": ms, "unknowns": paths,
+                          "asked": list(cal["unknowns"])}
             for m in cal["measurements"]:
                 if m.get("analysis") and m["analysis"] not in form["analyses"]:
                     form["analyses"][m["analysis"]] = True
         if optz:
             out["opt"] = optz
         return out
+
+    # ------------------------------------------------------------------ calibration precheck
+    def _filled(self, form):
+        """The form with the library values written in (a phase given by id only)."""
+        f = copy.deepcopy(form)
+        mx = f.get("matrix") or {}
+        if mx.get("material_id") and not mx.get("props"):
+            mx["props"] = dict(self.props(mx["material_id"]))
+        mx.setdefault("name", self.mname(mx.get("material_id")))
+        for ph in f.get("phases") or []:
+            if ph.get("material_id") and not ph.get("props"):
+                ph["props"] = dict(self.props(ph["material_id"]))
+        return f
+
+    def _cal_precheck(self, payload, ans, lang, ask, opt, summary):
+        """The measurements against the model before the run: when what was asked
+        cannot reach them, the set of unknowns that can is recommended (and
+        pre-selected) with the reason; the user may keep the request's own."""
+        L = lambda ko, en: _lab(lang, ko, en)                                     # noqa: E731
+        cal = payload["cal"]
+        asked = [u.get("key") or u["path"] for u in cal["unknowns"]]
+        try:
+            chk = CC.precheck(self._filled(payload["form"]), cal, asked, lang)
+        except Exception:                                                  # noqa: BLE001
+            chk = None
+        if not chk:
+            return
+        foot = [r for r in summary if r.get("k") == "*"]
+        summary[:] = [r for r in summary if r.get("k") != "*"]
+        names = {"r_int": L("계면저항 R_int", "R_int"), "r_contact": L("접촉저항 R_c", "R_c"),
+                 "filler_k": L("필러 열전도도", "filler k"), "matrix_k": L("매트릭스 열전도도", "matrix k")}
+        lab = lambda keys: " + ".join(names.get(k, k) for k in keys)                    # noqa: E731
+        plans = chk["plans"]
+        rec = plans[chk["choice"]]
+        pick = ans.get("cal_plan")
+        chosen = next((p for p in plans if "+".join(p["keys"]) == pick), None) if pick else rec
+        unit = "W/m·K"
+        rows = []
+        for r in chk["rows"]:
+            rows.append(f"{r['label']}: {L('측정', 'measured')} {r['value']:g} · "
+                        + L(f"병렬 상한 {r['parallel']:.3g}, 직렬 하한 {r['series']:.3g} {unit}",
+                            f"parallel bound {r['parallel']:.3g}, series bound {r['series']:.3g} {unit}"))
+        txt = "; ".join(rows)
+        if chk["above"]:
+            txt += L(f" - {', '.join(chk['above'])}의 측정값은 라이브러리 값(매트릭스 {chk['rows'][0]['km']:g}, 필러 "
+                     f"{chk['rows'][0]['kf'][0]:g} {unit})으로는 어떤 미세구조로도 낼 수 없는 값(병렬 상한 초과)",
+                     f" - {', '.join(chk['above'])} lies above what any microstructure gives with the library values "
+                     f"(matrix {chk['rows'][0]['km']:g}, filler {chk['rows'][0]['kf'][0]:g} {unit})")
+        summary.append({"k": L("사전 점검", "Precheck"), "v": txt})
+        a = plans[0]
+        if a.get("miss") is not None:
+            summary.append({"k": L("요청대로", "As asked"),
+                            "v": L(f"{lab(a['keys'])}: 유효매질 추정이 측정을 최대 {100 * a['miss']:.0f}% 벗어남",
+                                   f"{lab(a['keys'])}: the effective-medium estimate misses the data by up to {100 * a['miss']:.0f} %")
+                            + (L(" - 도달 가능", " - reachable") if chk["asked_ok"] else L(" - 이것만으로는 도달 불가", " - cannot reach them alone"))})
+        if not chk["asked_ok"] and chk["reachable"]:
+            est = ", ".join(f"{names.get(u.get('key'), u['label'])} ≈ {v:.3g}"
+                            for u, v in zip(rec["unknowns"], (rec.get("estimate") or {}).values()))
+            summary.append({"k": L("AI 추천", "AI recommends"),
+                            "v": L(f"{lab(rec['keys'])} 보정 (유효매질 추정 {est}, 측정과 {100 * rec['miss']:.1f}% 이내). "
+                                   f"측정값이 이 조합을 가리키거나, 재료 등급(예: 결정질 실리카)·함량 기준이 입력과 다를 수 있음",
+                                   f"calibrate {lab(rec['keys'])} (effective-medium estimate {est}, within "
+                                   f"{100 * rec['miss']:.1f} % of the data); or the material grade (crystalline silica, "
+                                   f"say) or the content basis differs from the input")})
+            ask("cal_plan", L("측정값에 맞출 보정 대상을 고르세요.", "Which unknowns should the calibration fit?"),
+                [opt("+".join(rec["keys"]), lab(rec["keys"]) + " ← 추천", lab(rec["keys"]) + " ← recommended", True)]
+                + [opt("+".join(p["keys"]), lab(p["keys"]) + (" (요청)" if i == 0 else ""), lab(p["keys"]) + (" (asked)" if i == 0 else ""))
+                   for i, p in enumerate(plans) if p is not rec and p.get("miss") is not None],
+                essential=False, default="+".join(rec["keys"]), free=False)
+        elif not chk["reachable"]:
+            summary.append({"k": L("AI 판단", "AI reading"),
+                            "v": L("어떤 보정 대상 조합도 유효매질 추정으로 측정을 재현하지 못함: 측정값, 함량 기준(vol/wt), 재료를 확인하세요. "
+                                   "요청대로 실행하고, 끝난 뒤 결과를 보고 범위를 다시 잡습니다.",
+                                   "no set of unknowns reproduces the data on the effective-medium model: check the values, the "
+                                   "content basis (vol/wt) and the materials. It runs as asked, and the ranges are revisited "
+                                   "from the result.")})
+        if chosen is not None and chosen is not a:
+            cal["unknowns"] = copy.deepcopy(chosen["unknowns"])
+        summary[:] = [r for r in summary if r.get("k") not in ("보정 대상", "Calibrated")]
+        cal["plan_keys"] = "+".join((chosen or a)["keys"])
+        summary.append({"k": L("보정 대상", "Calibrated"),
+                        "v": "; ".join(f"{u['label']} {u['lo']:.3g}~{u['hi']:.3g} {u.get('unit', '')}" for u in cal["unknowns"])
+                        + L(" · 결과가 측정에 닿지 않으면 AI가 범위나 대상을 바꿔 닿을 때까지 다시 보정하고, 더 바꿀 것이 없으면 묻습니다",
+                            " · if the result does not reach the data, the AI changes a range or the unknowns and runs again until "
+                            "it does, and asks when nothing is left to change")})
+        summary.extend(foot)
+
+    # ------------------------------------------------------------------ material values said
+    def _said_values(self, mid, model_props, it):
+        """The values this request gives a material: the model's, and the
+        rules' over them (a relative change from the library value, "10 낮게",
+        only from the rules). -> (values or None, how)"""
+        said = [x for x in it.get("matprops") or [] if x.get("id") == mid]
+        vals, how = MP.resolve(said, self.props(mid))
+        out = dict(model_props or {})
+        out.update(vals)
+        for k in out:
+            how.setdefault(k, ("said", None))
+        return (out or None), how
+
+    def _values_note(self, label, mid, vals, how, lang):
+        lib = self.props(mid)
+        parts_ko, parts_en = [], []
+        for k, v in vals.items():
+            u = PROP_UNIT.get(k, "")
+            b = lib.get(k)
+            kind, x = how.get(k, ("said", None))
+            if kind == "delta":
+                ko, en = f"라이브러리 {b:g}에서 {x:+g}", f"library {b:g} {x:+g}"
+            elif kind == "percent":
+                ko, en = f"라이브러리 {b:g}의 {x:+g}%", f"library {b:g} {x:+g} %"
+            elif kind == "factor":
+                ko, en = f"라이브러리 {b:g} × {x:g}", f"library {b:g} × {x:g}"
+            else:
+                ko, en = f"입력값, 라이브러리 {b if b is not None else '-'}", f"your value; library {b if b is not None else '-'}"
+            parts_ko.append(f"{k} = {v:.4g} {u} ({ko})")
+            parts_en.append(f"{k} = {v:.4g} {u} ({en})")
+        return _lab(lang, f"{label}: " + ", ".join(parts_ko) + " - 이번 해석에만 쓰고 재료 라이브러리는 바꾸지 않음",
+                    f"{label}: " + ", ".join(parts_en) + " - for this request only; the material library is not changed")
+
+    # ------------------------------------------------------------------ design
+    def _design_plan(self, it, dz, fl, an, ans, auto, lang, ask, opt, notes, problems):
+        """The study of a design request (design.py): its classes of
+        particles, its DOE parameters and how the recipe is chosen."""
+        L = lambda ko, en: _lab(lang, ko, en)                                     # noqa: E731
+        if not dz.get("targets"):
+            ask("design_target", L("어떤 목표를 맞출까요? (예: z방향 열전도도 3 W/mK 이상)",
+                                   "Which target should the design reach? (e.g. a k_z of at least 3 W/mK)"))
+            return None
+        d = copy.deepcopy(dz)
+        tg = dict(d["targets"][0])
+        # every target is met ("유전율 3.0 이하이면서 CTE 30 이하"): each property's analysis runs in every case
+        tgs = []
+        for t_ in d["targets"]:
+            if all(x["property"] != t_["property"] for x in tgs):
+                tgs.append(dict(t_, response=DZ.PROP_RESPONSE[t_["property"]]))
+        for t_ in reversed(tgs):
+            a_t = DZ.PROP_ANALYSIS[t_["property"]]
+            if a_t not in an:
+                an.insert(0, a_t)
+        check = ["viscosity"] if (set(d.get("prefer") or []) or d.get("objective") == "viscosity" or "viscosity" in an) else []
+        an[:] = [a for a in an if a != "viscosity"]
+        if tg.get("direction") == "z":
+            it["directions"] = "z"
+        elif tg.get("direction") == "xy":
+            it["directions"] = "x"
+        uniq = list(dict.fromkeys(f["id"] for f in fl if f.get("id")))
+        if not uniq:
+            return None
+        if len(uniq) > 2:
+            problems.append(L("설계는 필러 재료 두 가지까지 다룹니다. 두 가지로 줄여 주세요.",
+                              "A design handles up to two filler materials; name two."))
+            return None
+        find = set(d.get("find") or [])
+        f0 = next(f for f in fl if f.get("id") == uniq[0])
+        dup = [f for f in fl if f.get("id") == uniq[0]] if len(uniq) == 1 else []
+        same = len(uniq) == 1 and ("ratio" in find or (d.get("classes") or 1) >= 2 or len(dup) >= 2)
+        ss = d.get("sizes_said") or []
+        if (d.get("classes") or 0) >= 3 and not (len(uniq) == 1 and len(ss) >= 3 and "size" not in find):
+            notes.append(L("세 가지 크기는 크기를 모두 말한 경우(예: 70, 5, 0.5 µm)만 다루고, 여기서는 두 가지 크기(굵은 입자·미세 입자)로 설계합니다",
+                           "three sizes are designed when all three are said (70, 5 and 0.5 µm, say); here two sizes (coarse and fine) are"))
+        if len(uniq) == 1 and len(ss) >= 2 and "size" not in find:
+            # the sizes of the blend said one by one ("70um, 5um, 0.5um 세 가지"): one class each, sizes kept
+            tags = [L("굵은", "coarse"), L("중간", "medium"), L("미세", "fine")] if len(ss) >= 3 else [L("굵은", "coarse"), L("미세", "fine")]
+            classes = [{"name": f"{f0['name']}, {v:g} µm", "f": dict(f0, size_um=v), "same": i > 0, "tag": tags[i]}
+                       for i, v in enumerate(ss[:3])]
+            same = True
+        elif same and len(dup) >= 2 and all(x.get("size_um") for x in dup[:2]) and "size" not in find:
+            # two sizes of one material said ("1 um and 0.3 um alumina"): the blend of these two
+            big, small = sorted(dup[:2], key=lambda x: -x["size_um"])
+            classes = [{"name": f"{f0['name']}, {big['size_um']:g} µm", "f": big, "same": False},
+                       {"name": f"{f0['name']}, {small['size_um']:g} µm", "f": small, "same": True}]
+        elif same:
+            f0 = dict(f0, size_um=None) if "size" in find or not f0.get("size_um") else f0
+            classes = [{"name": f"{f0['name']}, coarse", "f": f0, "same": False},
+                       {"name": f"{f0['name']}, fine", "f": dict(f0, size_um=None), "same": True}]
+        elif len(uniq) == 2:
+            f1 = next(f for f in fl if f.get("id") == uniq[1])
+            classes = [{"name": f0["name"], "f": f0, "same": False}, {"name": f1["name"], "f": f1, "same": False}]
+        else:
+            classes = [{"name": f0["name"], "f": f0, "same": False}]
+        sizes_fixed = [c["f"].get("size_um") if "size" not in find else None for c in classes]
+        need_sizes = any(v is None for v in sizes_fixed) and ("size" in find or same)
+        if ans.get("design_sizes"):
+            qs = [q for q in quantities(normalize(str(ans["design_sizes"])))]
+            if qs:
+                u = qs[0].get("unit") if qs[0].get("unit") in ("um", "nm", "mm") else "um"
+                lo_ = to_um(qs[0]["value"], u)
+                hi_ = to_um(qs[0]["hi"], u) if "hi" in qs[0] else (to_um(qs[1]["value"], qs[1].get("unit") or u) if len(qs) > 1 else None)
+                if lo_ and hi_:
+                    d["size_min_um"], d["size_max_um"] = min(lo_, hi_), max(lo_, hi_)
+        if need_sizes and (d.get("size_min_um") is None or d.get("size_max_um") is None):
+            lo_ = d.get("size_min_um") or (d["size_max_um"] / 10.0 if d.get("size_max_um") else 1.0)
+            hi_ = d.get("size_max_um") or (d["size_min_um"] * 10.0 if d.get("size_min_um") else 20.0)
+            if not auto:
+                ask("design_sizes", L("입자 크기 범위는? (예: 1~20 µm)", "Which size range? (e.g. 1-20 µm)"),
+                    [opt(f"{lo_:g}~{hi_:g} um", f"{lo_:g}~{hi_:g} µm", f"{lo_:g}-{hi_:g} µm", True)],
+                    essential=False, default=f"{lo_:g}~{hi_:g} um")
+            notes.append(L(f"크기 범위 {lo_:g}~{hi_:g} µm (말하지 않은 쪽은 가정)", f"size range {lo_:g}-{hi_:g} µm (the bound not said is assumed)"))
+            d["size_min_um"], d["size_max_um"] = lo_, hi_
+        if d.get("content_max") is None and "content" in find:
+            d["content_max"] = 60.0
+            notes.append(L("최대 함량 60 vol% (가정 - 말하지 않음)", "highest content 60 vol% (assumed - not said)"))
+        content_fixed = None
+        if "content" not in find:
+            cs = [f["content"]["value"] for f in fl if f.get("content")]
+            if not cs:
+                return None
+            content_fixed = sum(cs)
+        params, centre, miss = DZ.plan_factors(d, classes, sizes_fixed, content_fixed)
+        if params is None:
+            return None
+        if not params:
+            problems.append(L("설계로 바꿀 변수가 없습니다 (함량·크기·비율 중 무엇을 찾을지 알려 주세요).",
+                              "Nothing for the design to vary: say what to find (content, size or blend)."))
+            return None
+        design, n = DZ.doe_design(params)
+        roles = {p["path"]: p.pop("role") for p in params}
+        basis = d.get("basis") or "vol"
+        tg["response"] = DZ.PROP_RESPONSE[tg["property"]]
+        spec = {"target": tg, "targets": tgs, "content_floor": d.get("content_min"),
+                "objective": d.get("objective") or "content", "prefer": list(d.get("prefer") or []),
+                "tol": d.get("tol") or DZ.TOL_DEFAULT, "roles": roles, "basis": basis, "lang": lang,
+                "phases": [{"name": c["name"], "d": sizes_fixed[i] if not need_sizes else None} for i, c in enumerate(classes)],
+                "spheres": all((c["f"].get("shape") or "sphere") == "sphere" for c in classes),
+                "same_material": same, "content_fixed": content_fixed,
+                "share_fixed": centre.get("share", 0.0), "check_analyses": check, "mono": bool(d.get("mono"))}
+        doe = {"design": design, "samples": n if design == "lhs" else 12, "parameters": params, "n_cases": n,
+               "factors": []}
+        return {"doe": doe, "n_cases": n, "classes": classes, "centre": centre, "spec": spec, "d": d, "basis": basis,
+                "check": check, "interface": dict(it.get("interface") or {})}
+
+    def _design_rows(self, dp, film_um, lang):
+        L = lambda ko, en: _lab(lang, ko, en)                                     # noqa: E731
+        sp = dp["spec"]
+        tg = sp["target"]
+        pn = {"k": L("열전도도", "thermal conductivity"), "sigma": L("전기전도도", "electrical conductivity"),
+              "eps_r": L("유전율", "permittivity"), "alpha": "CTE", "E": L("탄성률", "Young's modulus")}[tg["property"]]
+        dr = {"z": "z ", "xy": L("면내 ", "in-plane ")}.get(tg.get("direction") or "", "")
+        op = {">=": "≥", "<=": "≤", "=": "="}[tg["op"]]
+        unit = DZ.PROP_UNIT.get(tg["property"], "")
+        goal = {"content": L("총 필러 함량 최소", "the least total filler"),
+                "viscosity": L("점도 최소", "the lowest viscosity")}.get(sp["objective"], sp["objective"])
+        each = f"{dr}{pn} {op} {tg['value']:g} {unit}".strip()
+        PN = {"k": L("열전도도", "thermal conductivity"), "sigma": L("전기전도도", "electrical conductivity"),
+              "eps_r": L("유전율", "permittivity"), "alpha": "CTE", "E": L("탄성률", "Young's modulus")}
+        for t_ in (sp.get("targets") or [])[1:]:
+            each += L(" 이면서 ", " and ") + f"{PN[t_['property']]} {({'>=': '≥', '<=': '≤', '=': '='})[t_['op']]} " \
+                f"{t_['value']:g} {DZ.PROP_UNIT.get(t_['property'], '')}".rstrip()
+        rows = [{"k": L("목표", "Goal"), "v": f"{goal} · {each}"}]
+        lab = {"content": L("총 함량", "total content"), "share": L("미세 입자 비율", "fine share") if sp["same_material"]
+               else L("두 번째 필러 비율", "second filler's share"), "size0": L("굵은 입자", "coarse size") if sp["same_material"]
+               else L("크기", "size"), "size1": L("미세 입자", "fine size") if sp["same_material"] else L("크기 2", "size 2")}
+        if len(sp.get("phases") or []) == 3:
+            lab.update(share=L("중간 입자 비율", "medium share"), share2=L("미세 입자 비율", "fine share"))
+        ps = []
+        for p in dp["doe"]["parameters"]:
+            role = sp["roles"].get(p["path"])
+            unit = ("µm" if role and role.startswith("size") else L("%(필러 중)", "% of filler") if role in ("share", "share2")
+                    else f"{sp['basis']}%" if role == "content" else p["unit"])
+            ps.append(f"{lab.get(role, p['label'])} {p['min']:g}~{p['max']:g} {unit}")
+        n = dp["n_cases"]
+        how = L(f"라틴 하이퍼큐브 {n}케이스", f"Latin hypercube, {n} cases") if dp["doe"]["design"] == "lhs" \
+            else L(f"전체 조합 {n}케이스", f"full factorial, {n} cases")
+        rows.append({"k": L("변수 (DOE)", "Variables (DOE)"), "v": " · ".join(ps) + f" ({how})"})
+        fixed = []
+        if film_um:
+            fixed.append(L(f"필름 {film_um:g} µm", f"film {film_um:g} µm"))
+        itf = dp.get("interface") or {}
+        if itf.get("r_int") is not None:
+            fixed.append(f"R_int {itf['r_int']:.3g} m²K/W")
+        if itf.get("r_contact") is not None:
+            fixed.append(f"R_c {itf['r_contact']:.3g} m²K/W")
+        if sp.get("mono"):
+            fixed.append(L("입자마다 단일 크기 (분포 없음)", "one size per class (no distribution)"))
+        if fixed:
+            rows.append({"k": L("고정 조건", "Fixed"), "v": " · ".join(fixed)})
+        tol = sp["tol"]
+        if sp["objective"] == "content":
+            pick = L(f"목표를 만족하는 최저 함량, 그보다 {tol:g} vol% 이내의 조합 중 ", f"the lowest content that meets the target; of the recipes within {tol:g} vol% of it, ")
+            pick += (L("점도가 가장 낮은 것 (같은 함량에서 점도가 낮을수록 패킹 φm이 높음)", "the one of lowest viscosity (at one content, a lower viscosity is a higher packing φm)")
+                     if sp["prefer"] else L("함량이 가장 낮은 것", "the lowest"))
+        else:
+            pick = L("목표를 만족하는 조합 중 점도가 가장 낮은 것", "of the recipes that meet the target, the lowest viscosity")
+        rows.append({"k": L("추천 기준", "Choice"), "v": pick})
+        if sp["prefer"] or sp["objective"] == "viscosity":
+            rows.append({"k": L("점도·패킹", "Viscosity, packing"),
+                         "v": L("DOE 각 케이스에서 풀지 않고, MPSim 점도 해석과 같은 식으로 모든 후보에서 계산: φm = 크기 분포의 랜덤 최밀충전(Farr-Groot), "
+                                "상대점도 = Krieger-Dougherty. 추천 조합만 점도 해석 전체(입자동역학 포함)로 확인",
+                                "not solved in each DOE case but computed for every candidate with the closed forms of MPSim's viscosity "
+                                "analysis: φm = random close packing of the size distribution (Farr-Groot), relative viscosity = "
+                                "Krieger-Dougherty; only the recommended recipe gets the full viscosity analysis (with particle dynamics)")
+                         + ("" if sp["spheres"] else L(" - 구형이 아니어서 φm 식은 쓰지 않음", " - not spheres: the φm closed form is not used"))})
+        rows.append({"k": L("진행", "Then"),
+                     "v": L("DOE가 끝나면 대리모델(가우스 과정, 교차검증)이 추천 함량을 허용 오차 안으로 정할 만큼 정확한지 라운드마다 보고, 모자라면 "
+                            "결정을 가르는 점을 더 해석합니다. 정해지면 추천 조합을 구조 3개로 확인 해석하고, 목표를 만족할 때까지 계속합니다",
+                            "when the DOE is done, each round checks whether the surrogate (Gaussian process, cross-validated) fixes "
+                            "the recipe's content within the tolerance, and runs the points that settle it when it does not; the "
+                            "recipe is then checked with three realisations, until the check meets the target")
+                     + (L(" (" + ", ".join(name(AN_NAME, a, "ko") for a in [DZ.PROP_ANALYSIS[tg["property"]]] + dp["check"]) + ")",
+                          " (" + ", ".join(name(AN_NAME, a, "en") for a in [DZ.PROP_ANALYSIS[tg["property"]]] + dp["check"]) + ")"))})
+        return rows
+
+    def _design_phases(self, it, lang, fl, dp):
+        """The base case's phases: one per class, at the centre of the study."""
+        sp, centre = dp["spec"], dp["centre"]
+        tot = float(centre.get("content") or 50.0)
+        share = float(centre.get("share", 0.0)) / 100.0 if len(dp["classes"]) >= 2 else 0.0
+        vf = DZ.class_fractions(len(dp["classes"]), share, float(centre.get("share2", 0.0)) / 100.0)
+        out = []
+        for i, c in enumerate(dp["classes"]):
+            f = dict(c["f"])
+            f["size_um"] = centre.get(f"size{i}") or f.get("size_um") or DEFAULT_SIZE_UM
+            v = tot * vf[i]
+            f["content"] = {"value": round(v, 4), "basis": dp["basis"]}
+            if sp.get("mono"):
+                f["std_um"], f["cv"] = None, None
+            ph = self._phase(f, lang, None if not sp.get("mono") else "mono")
+            if sp.get("mono"):
+                ph["dist"] = {"type": "mono"}
+            ph["name"] = c["name"]
+            if it.get("orientation") and ph["shape"] in ("spheroid", "cylinder"):
+                ph["orientation"]["mode"] = it["orientation"]
+            out.append(ph)
+        return out
+
+    def _payload_design(self, it, lang, matrix_id, fl, an, quality, par, dp, film_um):
+        out = self._payload(it, lang, "design", matrix_id, [], an, quality, par, None, None, None, film_um,
+                            phases=self._design_phases(it, lang, fl, dp))
+        form = out["form"]
+        form["name"] = "AI · design · " + self.mname(matrix_id).split(" (")[0] + " + " + \
+            " + ".join(dict.fromkeys(self.mname(c["f"]["id"]).split(" (")[0] for c in dp["classes"]))
+        doe = copy.deepcopy(dp["doe"])
+        doe.pop("factors", None)
+        doe["name"] = form["name"] + " · DOE"
+        doe["edge"] = self._edge(it, doe["parameters"])
+        out["doe"] = doe
+        out["design"] = copy.deepcopy(dp["spec"])
+        out["design"]["interface"] = dp["interface"]
+        return out
+
+    @staticmethod
+    def _edge(it, params):
+        """The grid of a study's cases. A particle size that varies: each case its own grid, edge and voxel
+        planned by MPSim for its particles at the accuracy level ('own'). One grid for all would put a
+        30 µm particle in the 21 µm box planned for 5 µm (the cases then differ by the box, not the size),
+        or leave the small ones under-resolved. A grid the person set stays theirs: their voxel with each
+        case's edge ('adaptive'), their edge for every case ('fixed')."""
+        rv = it.get("rve") or {}
+        if not any(str(p.get("path", "")).endswith(".size.d") for p in params) or rv.get("L_um") or rv.get("N"):
+            return "fixed"
+        return "adaptive" if rv.get("voxel_um") else "own"      # a voxel set: kept, the edge still per case
+
+    def _corner_form(self, payload, dp):
+        """The base case at the heaviest corner of the study, for its plan."""
+        form = copy.deepcopy(payload["form"])
+        roles = dp["spec"]["roles"]
+        vals = {}
+        for p in dp["doe"]["parameters"]:
+            role = roles.get(p["path"])
+            vals[role] = p["max"] if role in ("content", "size0", "share", "share2") else p["min"] if role == "size1" else p["max"]
+        ph = form["phases"]
+        tot = vals.get("content", sum(x["fraction"]["value"] for x in ph))
+        if len(ph) >= 2:
+            s = vals.get("share", dp["centre"].get("share", 0.0)) / 100.0
+            s = s if s > 0 else 0.25
+            vf = DZ.class_fractions(len(ph), s, vals.get("share2", dp["centre"].get("share2", 0.0)) / 100.0)
+            for x, v in zip(ph, vf):
+                x["fraction"]["value"] = tot * v
+        else:
+            ph[0]["fraction"]["value"] = tot
+        for i in range(len(ph)):
+            if f"size{i}" in vals:
+                ph[i]["size"]["d"] = vals[f"size{i}"]
+        return form
 
     # ------------------------------------------------------------------ summary
     def _tag(self, src, lang):
@@ -721,7 +1164,9 @@ class Planner:
             if f.get("src") in ("fuzzy", "llm"):
                 tags.append(self._tag(f["src"], lang) + f" ('{f['slot'].get('text', '')}')")
             parts.append(name(SHAPE_NAME, f.get("shape"), lang) + ("*" if f.get("shape_src") in ("auto", "default") else ""))
-            if f.get("shape") != "network":
+            if f.get("shape") != "network" and f.get("size_um") is None:
+                parts.append(L("크기는 설계에서 찾음", "size found by the design"))
+            elif f.get("shape") != "network":
                 parts.append(f"{f.get('size_um'):g} µm" + ("*" if f.get("size_src") in ("auto", "default") else ""))
             if c:
                 bs = c.get("basis") or "vol"
@@ -736,6 +1181,8 @@ class Planner:
                     tags.append(L(f"'{c.get('raw', '')}' → 분율로 읽음", f"'{c.get('raw', '')}' read as a fraction"))
                 elif c.get("how") == "bare":
                     tags.append(L(f"'{c.get('raw', '')}' 단위 없음 → %로 읽음", f"'{c.get('raw', '')}' has no unit - read as %"))
+            elif task == "design":
+                parts.append(L("함량은 설계에서 찾음", "content found by the design"))
             else:
                 parts.append("?")
             rows.append({"k": L(f"필러 {i + 1}", f"Filler {i + 1}"), "v": " · ".join(parts), "src": "; ".join(tags)})
@@ -781,6 +1228,12 @@ class Planner:
                                                              f"'{n['text']}' → {self.mname(n['id'])} (context: {n['as']})")})
             elif n.get("type") == "unit" and n.get("rule") == "size_um":
                 rows.append({"k": L("단위", "Unit"), "v": L(f"'{n['text']}' → µm로 읽음", f"'{n['text']}' read in µm")})
+            elif n.get("type") == "composite_loading":
+                rows.append({"k": L("해석", "Reading"),
+                             "v": L(f"'{n['text']}' → 복합재의 필러 함량 {n['value']:g}%로 읽음 (매트릭스가 {n['value']:g}%라면 "
+                                    f"'필러 {100 - n['value']:g}%'로 알려 주세요)",
+                                    f"'{n['text']}' read as the composite's filler content, {n['value']:g} % (if the matrix "
+                                    f"is {n['value']:g} %, say 'filler {100 - n['value']:g}%')")})
         if any("*" in str(r.get("v", "")) for r in rows):
             rows.append({"k": "*", "v": L("자동 또는 기본값 (말하지 않은 조건)", "automatic or default (not said)")})
         return rows
@@ -904,6 +1357,29 @@ def merge(old, new):
     o = new.get("optimization") or {}
     it.setdefault("optimization", {}).update({k: v for k, v in o.items() if v is not None})
     it["notes"] = (it.get("notes") or []) + (new.get("notes") or [])
+    # a design: what the follow-up says of it replaces that part ("최대 함량은 60%로")
+    nd = new.get("design") or {}
+    if nd and (DZ.active(nd) or DZ.wanted(nd) or (it.get("design") and any(
+            nd.get(k) is not None for k in ("content_max", "content_min", "size_max_um", "size_min_um", "tol")))):
+        md = copy.deepcopy(it.get("design") or DZ.empty())
+        if nd.get("targets"):
+            md["targets"] = nd["targets"]
+        for k in ("objective", "content_max", "content_min", "size_max_um", "size_min_um", "classes", "tol", "basis"):
+            if nd.get(k) is not None:
+                md[k] = nd[k]
+        for k in ("find", "prefer"):
+            md[k] = list(dict.fromkeys(list(md.get(k) or []) + list(nd.get(k) or [])))
+        md["mono"] = bool(md.get("mono") or nd.get("mono"))
+        md.setdefault("said", {}).update(nd.get("said") or {})
+        it["design"] = md
+        if DZ.active(md) or DZ.wanted(md):
+            it["task"] = "design"
+    for k, v in (new.get("interface") or {}).items():
+        it.setdefault("interface", {})[k] = v
+    # a material value said again replaces the earlier one
+    if new.get("matprops"):
+        keys = {(x["id"], x["prop"]) for x in new["matprops"]}
+        it["matprops"] = [x for x in it.get("matprops") or [] if (x["id"], x["prop"]) not in keys] + list(new["matprops"])
     return it
 
 
