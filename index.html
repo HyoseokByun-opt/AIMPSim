@@ -27,7 +27,7 @@
   "description": "MPSim with an AI tab: simulation requests in words, read by a local language model and checked against the sentence.",
   "applicationCategory": "ScientificApplication",
   "operatingSystem": "Windows 10, Windows 11",
-  "softwareVersion": "0.2.0",
+  "softwareVersion": "0.3.0",
   "license": "https://opensource.org/licenses/MIT",
   "url": "https://hyoseokbyun-opt.github.io/AIMPSim/",
   "downloadUrl": "https://github.com/HyoseokByun-opt/AIMPSim/releases/latest",
@@ -190,8 +190,8 @@
       <a class="btn" href="https://github.com/HyoseokByun-opt/AIMPSim/blob/main/AIMPSim/docs/GUIDE_KO.md">Guide (Korean)</a>
       <a class="btn" href="https://github.com/HyoseokByun-opt/AIMPSim">Source code</a>
     </div>
-    <div class="meta"><b>Version 0.2.0</b> · MIT License · Windows 10 / 11 · works offline ·
-      MPSim 5.6.3 inside</div>
+    <div class="meta"><b>Version 0.3.0</b> · MIT License · Windows 10 / 11 · works offline ·
+      MPSim 5.6.4 inside</div>
     <figure class="banner shotframe">
       <img src="assets/ai_tab.png" width="1500" height="950" fetchpriority="high"
            alt="The AI tab of MPSim: a casual request with a correction, read into a summary of what will run, with the questions and their recommended answers">
@@ -245,6 +245,58 @@
         <tr><td lang="ko">알루미나랑 질화붕소 중에 에폭시에 30% 넣었을 때 어느 쪽이 열전도도 더 높은지 비교해줘</td><td>asked: each on its own (two runs), never one mixture</td></tr>
         <tr><td lang="ko">열전도도랑 CTE 둘 다 궁금한데, 에폭시에 알루미나를 절반보다 살짝 많이 넣은 경우야</td><td>asked: "a bit more than half" is not a number</td></tr>
       </table>
+    </div>
+  </section>
+
+  <section id="design">
+    <div class="wrap">
+      <h2>Design requests and calibrations</h2>
+      <p class="sub">A request can name a target and ask what to use; a calibration is checked before it runs and
+        revisited when it does not reach the data.</p>
+      <div class="grid">
+        <div class="card"><span class="tag ai">Design</span><h3>The least filler for a target</h3>
+          <ul><li><span lang="ko">"10um 에폭시 필름에서 알루미나를 가장 적게 넣고 z방향 열전도도 3 W/mK가 되는 크기와 배합비율, topcut 3um,
+            가장 작은 입자 200nm, 최대 62vol%, 비슷하면 점도 낮고 패킹 잘되는 조합"</span></li>
+          <li>A DOE over the total content, coarse and fine size and the fine share (40 cases), the film, R_int and R_c fixed</li>
+          <li>A Gaussian-process surrogate gives the lowest content that meets the target; of the recipes within 1 vol%,
+            the lowest viscosity (Farr-Groot packing, Krieger-Dougherty) is recommended</li>
+          <li>Round by round until it answers: where the surrogate cannot yet fix the content within 1 vol%, the points
+            that settle it are added to the study; then the recipe is checked with three realisations, until the check
+            meets the target. <span lang="ko">"멈춰"</span> stops it; a condition you type applies from the next round</li></ul></div>
+        <div class="card"><span class="tag ai">Calibration</span><h3>Checked before, revisited after</h3>
+          <ul><li>Measurements against the parallel and series bounds and MPSim's effective-medium preview, for each set of
+            unknowns: what cannot reach the data is said, and the set that can is recommended</li>
+          <li><span lang="ko">"실리카 20%일 때 0.45, 40%일 때 0.8 W/mK, 계면저항 보정"</span>: 0.8 lies above the parallel bound with fused
+            silica (0.67); the filler and matrix conductivities reach it (silica 6.39 - the library's crystalline silica, 6.5)</li>
+          <li>Until it reaches the data: ranges widened while the estimate sits at their end, the other unknowns tried;
+            when nothing is left to change, you are asked - another grade of the filler, wt% or vol%, or stop</li></ul></div>
+        <div class="card"><span class="tag ai">Optimisation</span><h3>Run until the optimum is checked</h3>
+          <ul><li><span lang="ko">"함량 30~55%, 크기 5~30um로 바꿔가며 열전도도 최대 조건"</span>: a DOE of 25 cases, then rounds</li>
+          <li>While the surrogate cross-validates below R² 0.8, points go where it is least sure; then where improvement
+            is expected (Jones, Schonlau and Welch 1998), until it falls below 1 % of the range</li>
+          <li>The predicted optimum is run as one more case and stands when the run gives what was predicted; otherwise
+            the search goes on with it</li></ul></div>
+        <div class="card"><span class="tag ai">More kinds</span><h3>Designs, studies and calibrations</h3>
+          <ul><li>Several targets met at once (<span lang="ko">"유전율 3.0 이하이면서 CTE 30 ppm/K 이하"</span>), each with its own
+            surrogate</li>
+          <li>Three sizes said one by one, a range for each size class (<span lang="ko">"대입자 20~70um과 소입자 0.5~5um"</span>),
+            the lowest viscosity as the goal, a value to meet, wt% throughout</li>
+          <li>Electrical conductivity fitted as its logarithm across percolation</li>
+          <li>Calibrations of CTE, permittivity, modulus and electrical conductivity; measurements written as lists
+            (<span lang="ko">"40, 50, 60vol%에서 각각 0.9, 1.4, 2.3 W/mK"</span>)</li></ul></div>
+        <div class="card"><span class="tag ai">Material values</span><h3>For one request</h3>
+          <ul><li><span lang="ko">"알루미나 열전도도 20으로", "라이브러리보다 10 낮게", "30% 높게", "절반으로"</span></li>
+          <li>The value goes into this case's phase and name; the material library is not changed, and the next request
+            starts from it again</li></ul></div>
+      </div>
+      <figure class="shot" style="margin-top:22px">
+        <img src="assets/ai_design.png" width="1500" height="1000" loading="lazy"
+             alt="The design request read: target, variables of the DOE, fixed conditions, how the recipe is chosen, and the plan of the largest case">
+      </figure>
+      <figure class="shot" style="margin-top:14px">
+        <img src="assets/ai_calibration.png" width="1500" height="1000" loading="lazy"
+             alt="A calibration whose measurements an interfacial resistance cannot reach: the bounds, the recommended unknowns, and the result">
+      </figure>
     </div>
   </section>
 
@@ -316,22 +368,25 @@
     <div class="wrap">
       <h2>Verification</h2>
       <p class="sub">The AI tab is checked on the inputs it makes, not on the analyses - those are MPSim's, verified by its own
-        88 problems with known solutions. Every request has its answer written down; a reading is right, asked (left open
+        89 problems with known solutions. Every request has its answer written down; a reading is right, asked (left open
         and asked: safe) or wrong.</p>
       <div class="stats">
-        <div class="stat"><b>27/30</b><span>right of the 30 requests written last, read with the 2B model (28/30 with the 4B, none wrong; on their first reading, before the three fixes they led to, 25 and 27)</span></div>
+        <div class="stat"><b>30/30</b><span>right of the 30 requests written last, read with the 2B model (after the fixes they led to; on their first reading in 0.2.0, 25 with the 2B and 27 with the 4B)</span></div>
         <div class="stat"><b>118/118</b><span>hand-written requests read as written through the model, inputs accepted by MPSim</span></div>
-        <div class="stat"><b>0 missed</b><span>in 309 generated requests sampled from every kind and read through the model; one wrong, fixed after the run</span></div>
-        <div class="stat"><b>0</b><span>wrong inputs from the rules alone in 5,002 generated requests</span></div>
+        <div class="stat"><b>0 wrong</b><span>in 309 generated requests sampled from every kind and read through the model</span></div>
+        <div class="stat"><b>0</b><span>wrong inputs from the rules alone in 5,026 generated requests</span></div>
       </div>
       <h3 style="margin:30px 0 8px">Requests as people write them</h3>
       <table class="bench">
         <tr><th>Set</th><th>Rules alone</th><th>Qwen3.5-2B + checks</th></tr>
-        <tr><td>114 requests the checks were developed on</td><td>45 / 35 / 34</td><td><b>106 / 7 / 1</b></td></tr><tr><td>50 held out, then used for changes</td><td>23 / 14 / 13</td><td><b>44 / 6 / 0</b></td></tr><tr><td>40 held out, then used for changes</td><td>19 / 9 / 12</td><td><b>39 / 1 / 0</b></td></tr><tr><td>30 written last (three fixes followed their first reading)</td><td>14 / 6 / 10</td><td><b>27 / 1 / 2</b></td></tr>
+        <tr><td>114 requests the checks were developed on</td><td>55 / 29 / 30</td><td><b>110 / 4 / 0</b></td></tr><tr><td>50 held out, then used for changes</td><td>28 / 11 / 11</td><td><b>47 / 3 / 0</b></td></tr><tr><td>40 held out, then used for changes</td><td>21 / 8 / 11</td><td><b>39 / 1 / 0</b></td></tr><tr><td>30 written last, then used for changes</td><td>16 / 4 / 10</td><td><b>30 / 0 / 0</b></td></tr>
       </table>
       <p class="note" style="margin-top:10px">Right / asked / wrong. The sets cover roundabout wording, corrections, words taken
         back, spacing, mixed languages, typing errors, amounts and ratios, material values, sizes, settings, studies,
-        calibrations, vague amounts and sentences that are not requests. <code>python AIMPSim/tests/freeform.py</code>
+        calibrations, vague amounts and sentences that are not requests. The first reading with the 0.3.0 changes gave
+        102 / 11 / 1, 40 / 8 / 2, 38 / 2 / 0 and 22 / 4 / 4: worked design requests in the model's instructions made it
+        copy their numbers; they were removed and the misreadings fixed, so every set is now one that changes came from.
+        <code>python AIMPSim/tests/freeform.py</code>
         (<code>--llm &lt;llama-server&gt; &lt;model&gt;</code> for the model), <code>run_tests.py</code>,
         <code>exhaustive.py</code>.</p>
     </div>
@@ -342,7 +397,7 @@
       <h2>Download and install</h2>
       <div class="two">
         <div class="card"><h3>PC without internet</h3>
-          <p>Download <code>AIMPSim-0.2.0-offline-win64.zip</code> from the
+          <p>Download <code>AIMPSim-0.3.0-offline-win64.zip</code> from the
           <a href="https://github.com/HyoseokByun-opt/AIMPSim/releases/latest">latest release</a>: MPSim with the AI tab, the
           model and its server, the Python runtime, every wheel and openEMS. Unzip to a short path such as
           <code>C:\AIMPSim</code>, run <code>1_INSTALL_OFFLINE.bat</code>, then <code>2_RUN_LOCAL.bat</code>.</p>
