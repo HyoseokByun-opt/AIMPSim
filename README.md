@@ -425,6 +425,15 @@ model, `--list` shows the others. MPSim's user guides apply unchanged
 [Korean](https://github.com/HyoseokByun-opt/MPSim/releases/latest/download/MPSim-User-Guide-KO.pdf)); the AI tab is
 described in [AIMPSim/docs/GUIDE_KO.md](AIMPSim/docs/GUIDE_KO.md).
 
+## Related projects
+
+- [MPSim](https://github.com/HyoseokByun-opt/MPSim) ([project page](https://hyoseokbyun-opt.github.io/MPSim/)) -
+  the simulation program inside AIMPSim: effective properties of semiconductor materials from their 3D
+  microstructure.
+- [AICAD](https://github.com/HyoseokByun-opt/AICAD) ([project page](https://hyoseokbyun-opt.github.io/AICAD/)) -
+  AI-assisted CAD modelling: engineering drawings or descriptions to parametric 3D solids (STEP) and beam and shell
+  analysis models, with a local vision-language model and the OpenCASCADE kernel.
+
 ## Licence
 
 MIT (see LICENSE). AIMPSim is MPSim with the AI tab; the open-source projects MPSim builds on are listed in its
