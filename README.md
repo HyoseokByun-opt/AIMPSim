@@ -6,8 +6,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.1-8250df" alt="version 0.3.1">
-  <a href="https://github.com/HyoseokByun-opt/MPSim"><img src="https://img.shields.io/badge/MPSim-5.6.5-0b62c4" alt="MPSim 5.6.5 inside"></a>
+  <img src="https://img.shields.io/badge/version-0.3.2-8250df" alt="version 0.3.2">
+  <a href="https://github.com/HyoseokByun-opt/MPSim"><img src="https://img.shields.io/badge/MPSim-5.6.6-0b62c4" alt="MPSim 5.6.6 inside"></a>
   <img src="https://img.shields.io/badge/local%20model-Qwen3.5--2B%20%C2%B7%20offline-6e40c9" alt="local model Qwen3.5-2B, offline">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-555555" alt="Windows 10 | 11 x64">
   <img src="https://img.shields.io/badge/license-MIT-2da44e" alt="MIT licence">
@@ -321,7 +321,7 @@ instead: `AIMPSim\GET_AI_MODEL.bat --model qwen3.5-4b` (`--list` shows the other
 ## Verification
 
 The AI tab is checked on the inputs it makes, not on the analyses (those are MPSim's, checked by its own self-test,
-`5_SELF_TEST.bat`, 90 problems with known solutions). Every request below has its answer written down; a reading is
+`5_SELF_TEST.bat`, 91 problems with known solutions). Every request below has its answer written down; a reading is
 right, asked (left open and asked - safe), or wrong (read as something else).
 
 **Requests as people write them** (`python AIMPSim/tests/freeform.py`, with `--llm <llama-server> <model>` for the
@@ -403,11 +403,11 @@ answer says so instead of suggesting a higher content.
 
 ## Installation
 
-**PC without internet.** Download `AIMPSim-0.3.1-offline-win64.zip` from the
+**PC without internet.** Download `AIMPSim-0.3.2-offline-win64.zip` from the
 [latest release](https://github.com/HyoseokByun-opt/AIMPSim/releases/latest): MPSim with the AI tab, the model and its
 server, the Python runtime, every wheel and openEMS. Unzip to a short path such as `C:\AIMPSim`, run
 `1_INSTALL_OFFLINE.bat`, then `2_RUN_LOCAL.bat`. For the larger model, unzip
-`AIMPSim-0.3.1-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
+`AIMPSim-0.3.2-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
 
 **PC with internet and conda.**
 
