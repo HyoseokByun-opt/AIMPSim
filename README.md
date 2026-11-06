@@ -321,7 +321,7 @@ instead: `AIMPSim\GET_AI_MODEL.bat --model qwen3.5-4b` (`--list` shows the other
 ## Verification
 
 The AI tab is checked on the inputs it makes, not on the analyses (those are MPSim's, checked by its own self-test,
-`5_SELF_TEST.bat`, 91 problems with known solutions). Every request below has its answer written down; a reading is
+`5_SELF_TEST.bat`, 90 problems with known solutions). Every request below has its answer written down; a reading is
 right, asked (left open and asked - safe), or wrong (read as something else).
 
 **Requests as people write them** (`python AIMPSim/tests/freeform.py`, with `--llm <llama-server> <model>` for the
