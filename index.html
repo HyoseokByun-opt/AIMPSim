@@ -27,7 +27,7 @@
   "description": "MPSim with an AI tab: simulation requests in words, read by a local language model and checked against the sentence.",
   "applicationCategory": "ScientificApplication",
   "operatingSystem": "Windows 10, Windows 11",
-  "softwareVersion": "0.3.3",
+  "softwareVersion": "0.3.4",
   "license": "https://opensource.org/licenses/MIT",
   "url": "https://hyoseokbyun-opt.github.io/AIMPSim/",
   "downloadUrl": "https://github.com/HyoseokByun-opt/AIMPSim/releases/latest",
@@ -190,8 +190,8 @@
       <a class="btn" href="https://github.com/HyoseokByun-opt/AIMPSim/blob/main/AIMPSim/docs/GUIDE_KO.md">Guide (Korean)</a>
       <a class="btn" href="https://github.com/HyoseokByun-opt/AIMPSim">Source code</a>
     </div>
-    <div class="meta"><b>Version 0.3.3</b> · MIT License · Windows 10 / 11 · works offline ·
-      MPSim 5.6.7 inside</div>
+    <div class="meta"><b>Version 0.3.4</b> · MIT License · Windows 10 / 11 · works offline ·
+      MPSim 5.7.0 inside</div>
     <figure class="banner shotframe">
       <img src="assets/ai_tab.png" width="1500" height="950" fetchpriority="high"
            alt="The AI tab of MPSim: a casual request with a correction, read into a summary of what will run, with the questions and their recommended answers">
@@ -284,6 +284,12 @@
           <li>Electrical conductivity fitted as its logarithm across percolation</li>
           <li>Calibrations of CTE, permittivity, modulus and electrical conductivity; measurements written as lists
             (<span lang="ko">"40, 50, 60vol%에서 각각 0.9, 1.4, 2.3 W/mK"</span>)</li></ul></div>
+        <div class="card"><span class="tag ai">Through via</span><h3>A calibration, then the study, to the results</h3>
+          <ul><li><span lang="ko">"Cu paste의 비저항이 5E-5 Ω·cm로 측정됐어. 접촉저항을 보정한 다음, 1.8T 기판에 홀 100um, pitch 300um ...
+            Cu 함량 30~55 vol%와 도금 두께 5~25um로 DOE"</span>: the contact resistance R<sub>c,e</sub> fitted, then 30 cases with it,
+            then a table of the results and the effect of each factor</li>
+          <li>The hole, the board ("1.8T"), the pitch and the plating are the via's, never a particle's size; a paste's
+            particles may overlap, on one grid for the calibration and the study</li></ul></div>
         <div class="card"><span class="tag ai">Material values</span><h3>For one request</h3>
           <ul><li><span lang="ko">"알루미나 열전도도 20으로", "라이브러리보다 10 낮게", "30% 높게", "절반으로"</span></li>
           <li>The value goes into this case's phase and name; the material library is not changed, and the next request
@@ -372,7 +378,7 @@
         and asked: safe) or wrong.</p>
       <div class="stats">
         <div class="stat"><b>30/30</b><span>right of the 30 requests written last, read with the 2B model (after the fixes they led to; on their first reading in 0.2.0, 25 with the 2B and 27 with the 4B)</span></div>
-        <div class="stat"><b>118/118</b><span>hand-written requests read as written through the model, inputs accepted by MPSim</span></div>
+        <div class="stat"><b>124/124</b><span>hand-written requests read as written through the model, inputs accepted by MPSim</span></div>
         <div class="stat"><b>0 wrong</b><span>in 309 generated requests sampled from every kind and read through the model</span></div>
         <div class="stat"><b>0</b><span>wrong inputs from the rules alone in 5,026 generated requests</span></div>
       </div>
@@ -397,7 +403,7 @@
       <h2>Download and install</h2>
       <div class="two">
         <div class="card"><h3>PC without internet</h3>
-          <p>Download <code>AIMPSim-0.3.3-offline-win64.zip</code> from the
+          <p>Download <code>AIMPSim-0.3.4-offline-win64.zip</code> from the
           <a href="https://github.com/HyoseokByun-opt/AIMPSim/releases/latest">latest release</a>: MPSim with the AI tab, the
           model and its server, the Python runtime, every wheel and openEMS. Unzip to a short path such as
           <code>C:\AIMPSim</code>, run <code>1_INSTALL_OFFLINE.bat</code>, then <code>2_RUN_LOCAL.bat</code>.</p>
