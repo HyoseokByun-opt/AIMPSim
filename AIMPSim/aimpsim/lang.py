@@ -14,6 +14,7 @@ AN_NAME = {
     "morphology": ("기공률과 크기", "Porosity and sizes"), "percolation": ("퍼콜레이션", "Percolation path"),
     "porosimetry": ("포로시메트리", "Porosimetry"), "pore_network": ("기공 네트워크", "Pore network"),
     "grains": ("입자 분석", "Grain analysis"),
+    "via": ("관통 비아: 저항·임피던스·S-파라미터", "Through via: resistance, impedance, S-parameters"),
 }
 SHAPE_NAME = {"sphere": ("구형", "sphere"), "platelet": ("판상", "platelet"), "fiber": ("섬유(원기둥)", "fibre (cylinder)"),
               "cube": ("정육면체", "cube"), "irregular": ("불규칙 다면체", "irregular polyhedron"),
@@ -23,6 +24,7 @@ QUALITY_NAME = {"fast": ("Fast(빠름)", "Fast"), "standard": ("Standard(표준)
 TASK_NAME = {"run": ("해석 1건", "One run"), "doe": ("DOE 스터디", "DOE study"), "calibration": ("보정(Calibration)", "Calibration"),
              "optimization": ("최적화 (DOE 후 최적점 탐색)", "Optimization (a DOE, then its optimum)"),
              "structure": ("구조만 생성", "Structure only"),
+             "cal_doe": ("보정 → 보정값으로 DOE (연속 실행)", "Calibration, then a DOE with the fitted value"),
              "design": ("설계 탐색 (DOE → 대리모델 → 추천 조합 → 확인 해석)",
                         "Design search (a DOE, a surrogate, the recommended recipe, a check run)")}
 SRC = {"text": ("입력", "said"), "fuzzy": ("오타·발음 보정", "spelling matched"), "rule": ("단위 규칙", "unit rule"),

@@ -288,7 +288,10 @@ STOP = {"ko": ["해줘", "구해줘", "계산", "계산해줘", "해석", "해�
                "돌려줘", "진행", "진행해줘", "하나", "단계", "수준", "범위", "까지", "부터", "에서", "만큼", "정도", "이상",
                "이하", "사이", "기준", "방향", "크기", "입경", "지름", "직경", "평균", "함량", "비율", "분율", "부피", "중량",
                "무게", "질량", "퍼센트", "프로", "마이크로", "미크론", "마이크론", "나노", "코어", "병렬", "동시에", "반복",
-               "정확도", "도메인", "해줄래", "해주세요", "주세요", "부탁해", "원해", "보고", "싶다", "보자", "할때", "일때"],
+               "정확도", "도메인", "해줄래", "해주세요", "주세요", "부탁해", "원해", "보고", "싶다", "보자", "할때", "일때",
+               # a through via (via.py): never a material
+               "비아", "관통", "관통홀", "스루홀", "홀", "구멍", "도금", "도금층", "피치", "기판", "보드", "페이스트", "임피던스",
+               "드릴", "적층판", "충전", "필링", "채운", "채워서", "뚫고", "하이브리드", "리턴", "그라운드", "신호", "손실"],
         "en": ["the", "a", "an", "of", "with", "and", "in", "for", "to", "please", "compute", "calculate", "simulate",
                "find", "get", "what", "is", "are", "composite", "compound", "mixed", "filled", "containing", "content",
                "loading", "fraction", "size", "diameter", "average", "mean", "run", "analysis", "analyse", "analyze",
@@ -310,7 +313,11 @@ STOP = {"ko": ["해줘", "구해줘", "계산", "계산해줘", "해석", "해�
                "again", "said", "say", "tell", "today", "now", "later", "slow", "slowly", "faster", "wait",
                # units: a word after a number is its unit, not a material ("6 GPa", "2 S/m")
                "gpa", "mpa", "kpa", "pa", "ppm", "s", "m", "k", "w", "um", "nm", "mm", "cm", "vol", "wt", "phr", "cp",
-               "cps", "ohm", "mk", "hz", "ghz", "mhz", "khz", "db", "kelvin", "celsius", "sec", "min", "hr"]}
+               "cps", "ohm", "mk", "hz", "ghz", "mhz", "khz", "db", "kelvin", "celsius", "sec", "min", "hr",
+               # a through via (via.py): never a material
+               "via", "vias", "hole", "holes", "plating", "plated", "pitch", "paste", "pastes", "impedance", "drill",
+               "laminate", "barrel", "wall", "through", "fill", "filled", "filling", "hybrid", "return", "ground",
+               "signal", "insertion", "loss", "pth", "gsg"]}
 # frequent Korean words and endings (left out of fuzzy matching)
 STOP_KO_EXTRA = ["안녕하세요", "안녕", "오늘", "날씨", "좋네요", "결과", "결과를", "빨리", "보고", "싶어요", "지난번", "이전",
                  "같은", "다시", "이거", "이것", "그거", "저거", "왜", "이렇게", "그렇게", "오래", "걸려", "걸려요", "걸리네",
@@ -325,4 +332,6 @@ CAL_UNKNOWNS = {
     "r_int": ["계면저항", "계면 저항", "계면열저항", "계면 열저항", "카피차저항", "kapitza", "interface resistance",
               "interfacial resistance", "interfacial thermal resistance", "r_int", "rint"],
     "r_contact": ["접촉저항", "접촉 저항", "접촉열저항", "contact resistance", "r_c"],
+    # on the contacts of the particles in the electrical solve (a paste): MPSim's rc_elec
+    "rc_elec": ["전기 접촉저항", "전기접촉저항", "전기적 접촉저항", "electrical contact resistance", "r_c,e", "rce"],
 }

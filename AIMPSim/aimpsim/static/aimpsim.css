@@ -41,3 +41,7 @@
 .ai-card.ai-loopmsg{background:#f5f7fd;border-color:#d3dcf3}
 .ai-card.ai-loop{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;background:#fffaf0;border-color:#efd9a8}
 .ai-card.ai-loop .hint{flex:1 1 260px;font-size:11px}
+.ai-grid{margin-top:4px;font-variant-numeric:tabular-nums}
+.ai-grid th{font-weight:600;color:#5b6372;background:#f6f7f9;border-top:1px solid #eef0f3;padding:4px 6px;text-align:right;white-space:nowrap}
+.ai-grid th:first-child{text-align:left}
+.ai-grid td{text-align:right;width:auto!important;color:inherit!important;white-space:nowrap}

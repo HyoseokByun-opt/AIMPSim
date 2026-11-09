@@ -552,3 +552,76 @@ def explain(out, kind, lang="en", unit=""):
         ("stop", "few_runs"): L(" → 끝난 케이스가 너무 적어 멈춥니다", " → too few finished runs: stopped"),
     }.get((act, why), "")
     return head + tail
+
+
+# the responses a study is summed up by, in this order where it has them (a through via first)
+SUMMARY_ORDER = ("via_R", "via_share", "via_Rf", "via_Z0", "via_S21", "sigma", "k", "eps", "alpha", "E")
+# what follows from the composition alone, not a result
+SUMMARY_SKIP = ("density",)
+
+
+def _lv(v):
+    return float(f"{float(v):.6g}")
+
+
+def study_summary(study, rows, metrics, lang="en"):
+    """A finished study in a few lines: which responses change and by how much each factor moves them (the
+    spread of the level means), which do not change at all, and the table of the two that change most against
+    the first two factors. -> {text, tables, effects, constant, n_done, n_cases}"""
+    ko = lang == "ko"
+    L = lambda a, b: a if ko else b                                              # noqa: E731
+    params = study.get("parameters") or []
+    done = [r for r in rows if r.get("state") == "done" and r.get("metrics")]
+    meta = {m["key"]: m for m in metrics if not str(m["key"]).startswith("real_") and m["key"] not in SUMMARY_SKIP}
+    keys = sorted(meta, key=lambda k: (SUMMARY_ORDER.index(k) if k in SUMMARY_ORDER else len(SUMMARY_ORDER), k))
+    constant, effects, varying = [], [], []
+    for k in keys:
+        vals = [float(r["metrics"][k]) for r in done if r["metrics"].get(k) is not None]
+        if len(vals) < 2:
+            continue
+        lo, hi = min(vals), max(vals)
+        mean = sum(vals) / len(vals)
+        unit = meta[k].get("unit") or ""
+        if hi - lo <= 0.01 * max(abs(mean), 1e-30):
+            constant.append({"key": k, "label": meta[k]["label"], "unit": unit, "value": mean})
+            continue
+        eff = []
+        for p in params:
+            by = {}
+            for r in done:
+                v = r["values"].get(p["path"])
+                if v is not None and r["metrics"].get(k) is not None:
+                    by.setdefault(_lv(v), []).append(float(r["metrics"][k]))
+            means = [sum(x) / len(x) for x in by.values()]
+            if len(means) > 1:
+                eff.append({"path": p["path"], "label": p.get("label") or p["path"], "spread": max(means) - min(means)})
+        eff.sort(key=lambda e: -e["spread"])
+        effects.append({"key": k, "label": meta[k]["label"], "unit": unit, "min": lo, "max": hi, "by": eff})
+        varying.append(k)
+    tables = []
+    if len(params) >= 2:
+        pa, pb = params[0], params[1]
+        la = sorted({_lv(r["values"][pa["path"]]) for r in done if pa["path"] in r["values"]})
+        lb = sorted({_lv(r["values"][pb["path"]]) for r in done if pb["path"] in r["values"]})
+        for k in varying[:2]:
+            cell = {}
+            for r in done:
+                a, b = r["values"].get(pa["path"]), r["values"].get(pb["path"])
+                if a is not None and b is not None and r["metrics"].get(k) is not None:
+                    cell[(_lv(a), _lv(b))] = float(r["metrics"][k])
+            tables.append({"key": k, "label": meta[k]["label"], "unit": meta[k].get("unit") or "",
+                           "rows": {"label": pa.get("label") or pa["path"], "unit": pa.get("unit") or "", "levels": la},
+                           "cols": {"label": pb.get("label") or pb["path"], "unit": pb.get("unit") or "", "levels": lb},
+                           "cells": [[cell.get((a, b)) for b in lb] for a in la]})
+    n_fail = sum(1 for r in rows if r.get("state") in ("failed", "stopped"))
+    parts = [L(f"DOE {len(rows)}케이스가 끝났습니다 (결과 {len(done)}개" + (f", 실패·중지 {n_fail}개" if n_fail else "") + ").",
+               f"The DOE of {len(rows)} cases is done ({len(done)} with results" + (f", {n_fail} failed or stopped" if n_fail else "") + ").")]
+    for e in effects[:4]:
+        by = ", ".join(f"{b['label']} {b['spread']:.3g}" for b in e["by"])
+        parts.append(L(f"{e['label']}: {e['min']:.4g} – {e['max']:.4g} {e['unit']} (수준 평균의 차: {by})",
+                       f"{e['label']}: {e['min']:.4g} – {e['max']:.4g} {e['unit']} (spread of the level means: {by})"))
+    if constant:
+        same = "; ".join(f"{c['label']} {c['value']:.4g} {c['unit']}" for c in constant)
+        parts.append(L(f"모든 케이스에서 1 % 안으로 같음: {same}", f"The same in every case to within 1 %: {same}"))
+    return {"text": " ".join(parts), "tables": tables, "effects": effects, "constant": constant,
+            "n_done": len(done), "n_cases": len(rows)}

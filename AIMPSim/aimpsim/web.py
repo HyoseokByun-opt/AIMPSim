@@ -56,7 +56,7 @@ class Assistant:
         first (the whole request as it is now) and the rules check what it
         read (reader.py); without one, the rules read it alone."""
         sid, s = self._session(None if new else sid)
-        rule_it = parse(text, self.lex)
+        rule_it = parse(text, self.lex, via_open=bool((s["intent"] or {}).get("via")))
         base = rule_it if s["intent"] is None else merge(s["intent"], rule_it)
         it, llm_used = None, []
         if self.llm.configured:
@@ -339,6 +339,24 @@ def blueprint(assistant):
             unit = next((m.get("unit") for m in metrics if m["key"] == resp), "")
             out["text"] = LP.explain(out, "opt", b.get("lang") or "en", unit)
             out["response"] = resp
+        except Exception as e:                                     # noqa: BLE001
+            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+        out["ok"] = True
+        return jsonify(out)
+
+    @bp.post("/api/ai/study/summary")
+    def ai_study_summary():
+        """A finished study summed up (loop.study_summary): the end of a calibration followed by a DOE."""
+        from flask import current_app
+        from . import loop as LP
+        b = request.get_json(force=True, silent=True) or {}
+        store = getattr(current_app, "doe", None)
+        s = store.get(str(b.get("doe_id") or "")) if store is not None else None
+        if s is None:
+            return jsonify({"ok": False, "error": "DOE study not found"}), 404
+        rows, metrics = store.rows(s, current_app.queue)
+        try:
+            out = LP.study_summary(s, rows, metrics, b.get("lang") or "en")
         except Exception as e:                                     # noqa: BLE001
             return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
         out["ok"] = True

@@ -36,6 +36,17 @@ PORE_ANALYSES = {"permeability", "filtration", "tortuosity", "acoustics", "radia
 PROP_OF = {"thermal": "k", "electrical": "sigma", "dielectric": "eps_r", "magnetic": "mu_r", "cte": "E",
            "mechtest": "E", "emi": "sigma", "joule": "sigma", "moisture": "D_w", "thermomech": "E"}
 DOE_MAX = 64
+# a through via whose options the request leaves open (MPSim's own defaults and the literature of its presets):
+# the return vias at the pitch, the laminate (J. Temga et al., Sensors 24 (2024) 714, doi:10.3390/s24020714)
+VIA_DEFAULT = {"pitch_um": 300.0, "returns": "coax4", "eps_r": 3.37, "tan_d": 0.002, "z_ref": 50.0, "f_min": 1e3,
+               "f_max": 4e10, "n_f": 121, "f_ref": 1e10, "fill": "rve", "wall_material": "cu", "slices": 12}
+# a paste: overlapping particles (the necks a cure forms, M. Inoue et al., J. Smart Process. 5 (2016) 300,
+# doi:10.7791/jspmee.5.300) on a grid fine enough for the necks - d/16 - and of this many diameters per quality.
+# Cu spheres of 6.38 um at 40 vol% (5 realisations each, MPSim 5.7.0): sigma_z 2.38 MS/m in a box of 8 diameters,
+# 2.12 in 12, 2.00 in 16 and 2.05 in 20 (+-9 % between realisations up to 16, +-2 % in 20) - a box of 8 is 15 %
+# high, one of 12 within 5 %. The contact resistance a calibration finds holds for its grid, so the calibration
+# and the study share it.
+PASTE_GRID = {"fast": (16, 8), "standard": (16, 12), "accurate": (16, 20)}
 PROP_UNIT = {"k": "W/m·K", "sigma": "S/m", "E": "GPa", "alpha": "ppm/K", "rho": "g/cm³", "cp": "J/kg·K"}
 
 
@@ -306,10 +317,13 @@ class Planner:
                     [opt(k, name(AN_NAME, k, "ko"), name(AN_NAME, k, "en"), k == "thermal") for k in ANALYSIS_CHOICES],
                     multi=True, free=False)
 
+        if "via" in an and "electrical" not in an:
+            an.insert(an.index("via"), "electrical")
+
         # ---- task ----
         task = it.get("task") or "run"
         doe, cal, optz = None, None, None
-        if task in ("doe", "optimization"):
+        if task in ("doe", "optimization", "cal_doe"):
             factors = list(it.get("doe", {}).get("factors") or [])
             if ans.get("doe_range"):
                 factors = self._factors_from_text(ans["doe_range"], fl, lang) or factors
@@ -332,7 +346,7 @@ class Planner:
                 ask("opt_goal", t("q_opt_goal", lang, prop=p), [opt("max", "최대", "maximise", True), opt("min", "최소", "minimise")],
                     free=False)
             optz = {"goal": goal, "target": it.get("optimization", {}).get("target"), "analysis": an[0] if an else None}
-        if task == "calibration":
+        if task in ("calibration", "cal_doe"):
             meas = list(it.get("calibration", {}).get("measurements") or [])
             if ans.get("cal_meas"):
                 meas = self._measurements_from_text(ans["cal_meas"]) or meas
@@ -342,6 +356,9 @@ class Planner:
             if ans.get("cal_unknowns"):
                 unk = ans["cal_unknowns"] if isinstance(ans["cal_unknowns"], list) else [ans["cal_unknowns"]]
             mprop = next((m.get("property") for m in meas if m.get("property")), "k")
+            if mprop == "sigma" and "r_contact" in unk:
+                # the contacts of the particles in the electrical solve: MPSim's electrical contact resistance
+                unk = ["rc_elec" if u == "r_contact" else u for u in unk if u != "r_int"]
             # a value of another property than the one measured cannot be fitted to it ("실리카 CTE"
             # with conductivities measured): kept only when its property is measured
             unk = [u for u in unk if not re.match(r"(?:filler|matrix)_", u)
@@ -353,7 +370,7 @@ class Planner:
                                         f"보정합니다", f"interface and contact resistances act on the heat flow only, so {mprop} data "
                                                        f"cannot fit them: the material value that property depends on is fitted"))
             if not unk:
-                dflt = CC.DEFAULT_UNKNOWN.get(mprop, "r_int")
+                dflt = "rc_elec" if mprop == "sigma" and it.get("paste") else CC.DEFAULT_UNKNOWN.get(mprop, "r_int")
                 if auto or mprop != "k":
                     unk = [dflt]
                 else:
@@ -369,6 +386,8 @@ class Planner:
             dplan = self._design_plan(it, dz, fl, an, ans, auto, lang, ask, opt, notes, problems)
             if dplan:
                 doe = dplan["doe"]
+
+        via = self._via_options(it, an, ans, auto, lang, ask, opt, notes) if "via" in an else None
 
         # ---- film and pores ----
         film_um = it.get("film") or (self._size_answer(ans["film"]) if ans.get("film") else None)
@@ -397,6 +416,10 @@ class Planner:
         rec_q, rec_why = (max((self.auto_quality([f], an, matrix_id, n_cases, lang) for f in fl),
                               key=lambda q: ("fast", "standard", "accurate").index(q[0]))
                           if compare and fl else self.auto_quality(fl, an, matrix_id, n_cases, lang))
+        if it.get("paste") and rec_q == "fast":
+            rec_q, rec_why = "standard", _lab(lang, "페이스트: 입자 사이 neck과 접촉을 풀려면 표준 이상 (빠름의 굵은 격자는 복셀로 이어진 가짜 경로를 만듦)",
+                                              "a paste: Standard at least, for its necks and contacts (the coarse grid of Fast "
+                                              "joins particles through voxels)")
         if not quality:
             if auto:
                 quality, qsrc, qwhy = rec_q, "auto", rec_why
@@ -433,7 +456,7 @@ class Planner:
         for r_ in (it.get("llm_report") or {}).get("restored") or []:
             notes.append(_lab(lang, f"모델이 빠뜨려 규칙으로 보충: {r_}", f"left out by the model, kept from the rules: {r_}"))
         summary = self._summary(it, lang, task, matrix_id, matrix_src, fl, an, quality, qsrc, qwhy, par, psrc,
-                                rec_par_txt, None if dplan else doe, cal, optz, film_um, notes, n_cases)
+                                rec_par_txt, None if dplan else doe, cal, optz, film_um, notes, n_cases, via)
         if dplan:
             at = next((k for k, r in enumerate(summary) if r.get("k") in ("해석", "Analyses")), len(summary))
             summary[at:at] = self._design_rows(dplan, film_um, lang)
@@ -449,7 +472,8 @@ class Planner:
                     payload = runs[0]
                     payload["more_forms"] = [r["form"] for r in runs[1:]]
                 else:
-                    payload = self._payload(it, lang, task, matrix_id, fl, an, quality, par, doe, cal, optz, film_um)
+                    payload = self._payload(it, lang, task, matrix_id, fl, an, quality, par, doe, cal, optz, film_um,
+                                            via=via)
                 payload["settings_src"] = psrc
             except ValueError as e:
                 problems.append(str(e))
@@ -672,7 +696,67 @@ class Planner:
             ph["name"] += " · " + ", ".join(f"{k} {v:g}" for k, v in f["props"].items())
         return ph
 
-    def _payload(self, it, lang, task, matrix_id, fl, an, quality, par, doe, cal, optz, film_um, phases=None):
+    def _via_options(self, it, an, ans, auto, lang, ask, opt, notes):
+        """MPSim's options.via from the request (via.py), the answers and the defaults; the hole and the board
+        are asked, the plating is asked unless the program decides."""
+        L = lambda ko, en: _lab(lang, ko, en)                                     # noqa: E731
+        vr = it.get("via") or {}
+        o = dict(VIA_DEFAULT)
+        o.update({k: v for k, v in (vr.get("options") or {}).items() if v is not None})
+        for k, unit in (("hole_d_um", "um"), ("length_mm", "mm"), ("plating_um", "um"), ("pitch_um", "um")):
+            if ans.get(f"via:{k}") not in (None, ""):
+                v = self._length_answer(ans[f"via:{k}"], unit)
+                if v:
+                    o[k] = v
+        if not o.get("hole_d_um"):
+            ask("via:hole_d_um", L("비아 홀의 지름은? (예: 100 µm)", "The diameter of the via's hole? (e.g. 100 µm)"))
+        if not o.get("length_mm"):
+            ask("via:length_mm", L("기판 두께(비아 길이)는? (예: 1.8 mm 또는 1.8T)", "The board's thickness (the via's length)? (e.g. 1.8 mm)"))
+        factor = any(f.get("what") == "via" for f in (it.get("doe") or {}).get("factors") or [])
+        if not o.get("plating_um") and not factor:
+            if auto:
+                o["plating_um"] = 20.0
+                notes.append(L("도금 두께 20 µm (가정)", "plating 20 µm (assumed)"))
+            else:
+                ask("via:plating_um", L("홀 벽의 도금 두께는? (말하지 않으면 20 µm)", "The plating of the hole's wall? (20 µm if not said)"),
+                    [opt("10", "10 µm", "10 µm"), opt("20", "20 µm", "20 µm", True), opt("25", "25 µm", "25 µm")],
+                    essential=False, default="20")
+                o["plating_um"] = 20.0
+        if o.get("hole_d_um") and o.get("length_mm") and "throw" not in (vr.get("options") or {}):
+            ar = 1e3 * o["length_mm"] / o["hole_d_um"]
+            # the wall thinner in the middle of a deep hole: 0.80 of the surface's in 18:1 holes (G. L. Fisher et
+            # al., Trans. IMF 68 (1990) 50, doi:10.1080/00202967.1990.11870866)
+            o["throw"] = 0.8 if ar >= 15 else 1.0
+            o["_throw_src"] = "fisher" if ar >= 15 else "uniform"
+        if o.get("hole_d_um") and o.get("plating_um") and 2 * o["plating_um"] >= o["hole_d_um"]:
+            notes.append(L(f"도금 {o['plating_um']:g} µm가 홀 {o['hole_d_um']:g} µm를 다 채웁니다 (속이 빈 채움 없음)",
+                           f"a plating of {o['plating_um']:g} µm closes the {o['hole_d_um']:g} µm hole (no fill left)"))
+        return o
+
+    def _length_answer(self, v, unit):
+        """'100', '100um', '1.8T', '1.8 mm' -> a number in the unit asked (um or mm)."""
+        s = str(v).strip().lower()
+        m = re.match(r"(\d+(?:\.\d+)?)\s*(um|µm|마이크로|mm|밀리|t)?", s)
+        if not m:
+            return None
+        x = float(m.group(1))
+        u = m.group(2)
+        if u in ("mm", "밀리", "t"):
+            x = x * 1e3 if unit == "um" else x
+        elif u in ("um", "µm", "마이크로"):
+            x = x / 1e3 if unit == "mm" else x
+        return x if x > 0 else None
+
+    def _paste_grid(self, phases, quality, seed):
+        """The fixed grid of a paste: voxels of d/16 and PASTE_GRID diameters across (a multiple of 8 voxels)."""
+        d = min(float(p["size"]["d"]) for p in phases)
+        per, n_d = PASTE_GRID.get(quality, PASTE_GRID["standard"])
+        h = float(f"{d / per:.2g}")
+        n = max(8, 8 * int(round(n_d * d / h / 8.0)))
+        return {"auto": False, "voxel_um": h, "L_um": round(n * h, 6), "auto_enlarge": False, "quality": quality,
+                "seed": seed}
+
+    def _payload(self, it, lang, task, matrix_id, fl, an, quality, par, doe, cal, optz, film_um, phases=None, via=None):
         dw = (it.get("dist") or {}).get("type")
         phases = phases or [self._phase(f, lang, dw) for f in fl]
         # interface resistances said for the fillers ("필러-레진, 필러-필러 1E-8") hold for every one of them
@@ -687,9 +771,13 @@ class Planner:
         dirs = it.get("directions")
         if not dirs:
             dirs = "xyz" if any(p["orientation"]["mode"] != "iso" for p in phases) else "z"
+        def amount(c):
+            # a content a study varies is named by its range
+            lv = c.get("levels") or c.get("range")
+            v = f"{min(lv):g}-{max(lv):g}" if lv and doe and task != "design" else f"{c['value']:g}"
+            return f"{v} {c.get('basis') or 'vol'}%"
         name_ = " + ".join([self.mname(matrix_id).split(" (")[0]] + [
-            f"{self.mname(f['id']).split(' (')[0]} {f['content']['value']:g} {f['content'].get('basis') or 'vol'}%"
-            for f in fl])
+            f"{self.mname(f['id']).split(' (')[0]} {amount(f['content'])}" for f in fl])
         rve = {"auto": True, "quality": quality, "seed": int(it.get("seed") or 1)}
         if it.get("seeds"):
             rve["n_seeds"] = int(min(10, max(0, it["seeds"])))
@@ -704,6 +792,13 @@ class Planner:
                 rve["N"] = int(r["N"])
         if film_um:
             rve.update(film=True, T_um=float(film_um))
+        if it.get("paste"):
+            # a paste: its conducting particles may overlap (the necks of the cure), on the fixed grid of a paste
+            for p, f in zip(phases, fl):
+                if float(self.props(f["id"]).get("sigma") or 0.0) > 1e5:
+                    p["overlap"] = True
+            if rve.get("auto") and not film_um and any(p.get("overlap") for p in phases):
+                rve = self._paste_grid(phases, quality, rve["seed"])
         mx = {"material_id": matrix_id}
         mp_ = it.get("_matrix_props")
         if mp_:
@@ -712,6 +807,9 @@ class Planner:
             mx["name"] = self.mname(matrix_id) + " · " + ", ".join(f"{k} {v:g}" for k, v in mp_.items())
         form = {"name": "AI · " + name_, "matrix": mx, "phases": phases, "rve": rve,
                 "analyses": {k: True for k in an}, "options": {"directions": "zxy" if dirs == "xyz" else dirs}}
+        if via:
+            form["options"]["via"] = {k: v for k, v in via.items() if not k.startswith("_")}
+            form["name"] = "AI · via · " + name_
         out = {"kind": task, "form": form}
         if par:
             out["settings"] = {"concurrency": int(par.get("concurrency") or 1), "threads": int(par.get("threads") or 0)}
@@ -721,7 +819,7 @@ class Planner:
                 if f["what"] in ("content", "size") and not (0 <= int(f.get("filler", 0) or 0) < len(phases)):
                     continue
                 lv = None
-                if f["what"] in ("content", "size") and (f.get("range") or f.get("levels")):
+                if f["what"] in ("content", "size", "via") and (f.get("range") or f.get("levels")):
                     lv = self._levels(f, doe.get("steps"), doe.get("step"))
                 i = f.get("filler", 0)
                 if f["what"] == "content":
@@ -731,6 +829,11 @@ class Planner:
                 elif f["what"] == "size":
                     params.append({"path": f"phases.{i}.size.d", "label": f"{phases[i]['name']}: diameter",
                                    "unit": "µm", "min": min(lv), "max": max(lv), "steps": len(lv), "scale": "lin"})
+                elif f["what"] == "via":
+                    # a via option (the plating of the wall): its own levels
+                    params.append({"path": f"options.via.{f['key']}", "label": "Via wall plating" if f["key"] == "plating_um"
+                                   else f["key"], "unit": "µm", "min": min(lv), "max": max(lv), "steps": len(lv),
+                                   "scale": "lin", "values": [round(x, 6) for x in lv]})
                 elif f["what"] == "seed":
                     lo, hi = f["range"]
                     params.append({"path": "rve.seed", "label": "Random seed", "unit": "-", "min": lo, "max": hi,
@@ -1152,7 +1255,7 @@ class Planner:
         return name(SRC, src, lang) if src else ""
 
     def _summary(self, it, lang, task, matrix_id, matrix_src, fl, an, quality, qsrc, qwhy, par, psrc, partxt,
-                 doe, cal, optz, film_um, notes, n_cases):
+                 doe, cal, optz, film_um, notes, n_cases, via=None):
         L = lambda ko, en: _lab(lang, ko, en)                                     # noqa: E731
         rows = [{"k": L("작업", "Task"), "v": name(TASK_NAME, task, lang) + (f" · {n_cases} {L('케이스', 'cases')}" if doe else "")}]
         rows.append({"k": L("매트릭스", "Matrix"), "v": self.mname(matrix_id) if matrix_id else "?",
@@ -1189,6 +1292,22 @@ class Planner:
         rows.append({"k": L("해석", "Analyses"), "v": ", ".join(name(AN_NAME, k, lang) for k in an) or "?"})
         if film_um:
             rows.append({"k": L("필름", "Film"), "v": f"{film_um:g} µm"})
+        if via:
+            rows += self._via_rows(it, via, lang)
+        if it.get("paste"):
+            nd = PASTE_GRID.get(quality, PASTE_GRID["standard"])[1]
+            rows.append({"k": L("페이스트", "Paste"),
+                         "v": L(f"도전 입자가 서로 겹칠 수 있게(경화로 생긴 neck) · 격자 고정: 복셀 d/16, 박스 지름 {nd}개 (보정과 DOE가 같은 격자)",
+                                f"the conducting particles may overlap (the necks of the cure) · a fixed grid: voxels of d/16, a "
+                                f"box of {nd} diameters (the calibration and the DOE share it)"),
+                         "src": "M. Inoue et al., J. Smart Process. 5 (2016) 300, doi:10.7791/jspmee.5.300"})
+        if task == "cal_doe":
+            rows.append({"k": L("순서", "Sequence"),
+                         "v": L("① 보정: 측정값에 맞는 값을 찾음 (닿지 않으면 범위·대상을 바꿔 다시) → ② 그 값을 넣고 DOE 전체 실행 → "
+                                "③ 끝나면 결과 표와 인자별 영향을 여기에 정리",
+                                "1. the calibration finds the value that reproduces the data (ranges or unknowns changed until "
+                                "it does) → 2. the whole DOE with that value → 3. a table of the results and the effect of "
+                                "each factor, here")})
         rows.append({"k": L("정확도", "Accuracy"), "v": name(QUALITY_NAME, quality, lang) + ("*" if qsrc in ("auto", "default") else ""),
                      "src": qwhy, "key": "quality"})
         if par:
@@ -1204,9 +1323,10 @@ class Planner:
             for f in doe.get("factors") or []:
                 if f.get("range") or f.get("levels"):
                     lv = self._levels(f, doe.get("steps"), doe.get("step"))
-                    what = {"content": L("함량", "content"), "size": L("크기", "size"), "seed": "seed"}.get(f["what"], f["what"])
+                    what = {"content": L("함량", "content"), "size": L("크기", "size"), "seed": "seed",
+                            "via": L("비아 도금 두께 (µm)", "via wall plating (µm)")}.get(f["what"], f["what"])
                     nm = fl[f["filler"]]["name"] if "filler" in f and f["filler"] < len(fl) else ""
-                    rows.append({"k": "DOE", "v": f"{nm} {what}: " + ", ".join(f"{x:g}" for x in lv)})
+                    rows.append({"k": "DOE", "v": f"{nm} {what}: ".lstrip() + ", ".join(f"{x:g}" for x in lv)})
         if cal:
             for m in cal["measurements"]:
                 rows.append({"k": L("측정값", "Measured"), "v": f"{m['property']} = {m['value']:g}"
@@ -1236,6 +1356,40 @@ class Planner:
                                     f"is {n['value']:g} %, say 'filler {100 - n['value']:g}%')")})
         if any("*" in str(r.get("v", "")) for r in rows):
             rows.append({"k": "*", "v": L("자동 또는 기본값 (말하지 않은 조건)", "automatic or default (not said)")})
+        return rows
+
+    def _via_rows(self, it, o, lang):
+        L = lambda ko, en: _lab(lang, ko, en)                                     # noqa: E731
+        said = (it.get("via") or {}).get("said") or {}
+        star = lambda k: "" if k in said else "*"                                   # noqa: E731
+        ret = {"coax4": L("주변 4개", "4 around"), "coax8": L("주변 8개", "8 around"), "gsg": "G-S-G",
+               "sg": L("옆에 1개", "1 beside")}.get(o.get("returns"), o.get("returns"))
+        rows = []
+        if o.get("hole_d_um") and o.get("length_mm"):
+            ar = 1e3 * o["length_mm"] / o["hole_d_um"]
+            rows.append({"k": L("비아", "Via"),
+                         "v": L(f"홀 {o['hole_d_um']:g} µm{star('hole_d_um')} · 길이(기판) {o['length_mm']:g} mm{star('length_mm')} "
+                                f"(AR {ar:.3g}:1) · 리턴 비아 {ret}{star('returns')}, 피치 {o['pitch_um']:g} µm{star('pitch_um')}",
+                                f"hole {o['hole_d_um']:g} µm{star('hole_d_um')} · length (board) {o['length_mm']:g} mm"
+                                f"{star('length_mm')} (AR {ar:.3g}:1) · return vias {ret}{star('returns')}, pitch "
+                                f"{o['pitch_um']:g} µm{star('pitch_um')}")})
+        doe_wall = any(f.get("what") == "via" for f in (it.get("doe") or {}).get("factors") or [])
+        th = o.get("throw", 1.0)
+        rows.append({"k": L("도금", "Plating"),
+                     "v": (L("DOE 인자", "a DOE factor") if doe_wall else f"{o.get('plating_um', 0):g} µm{star('plating_um')}")
+                     + L(f" · 홀 가운데는 끝의 {th:g}배", f" · {th:g} of it in the hole's middle") + ("" if "throw" in said else "*"),
+                     "src": ("G. L. Fisher et al., Trans. IMF 68 (1990) 50, doi:10.1080/00202967.1990.11870866 (18:1 → 0.80)"
+                             if o.get("_throw_src") == "fisher" else "")})
+        rows.append({"k": L("적층재·주파수", "Laminate, frequency"),
+                     "v": f"εr {o['eps_r']:g}, tan δ {o['tan_d']:g}* · DC – {o['f_max'] / 1e9:g} GHz, "
+                          + L(f"{o['f_ref'] / 1e9:g} GHz에서 읽음", f"read at {o['f_ref'] / 1e9:g} GHz") + star("f_ref"),
+                     "src": "J. Temga et al., Sensors 24 (2024) 714, doi:10.3390/s24020714"})
+        rows.append({"k": L("비아 모델", "Via model"),
+                     "v": L("벽과 채움이 병렬(DC), 벽+채움의 베셀 해(주파수), 리턴 비아와의 단면 커패시턴스, 슬라이스 전송선로(S) - "
+                            "패드·안티패드·플레인은 포함하지 않음 (3D 전파 해석 아님)",
+                            "wall and fill in parallel (DC), the Bessel solution of the wall around the fill (frequency), the "
+                            "cross-section's capacitance with its return vias, a sliced transmission line (S) - no pads, "
+                            "antipads or planes (not a 3D full-wave model)")})
         return rows
 
     def _plan_row(self, pl, lang):
@@ -1345,7 +1499,30 @@ def merge(old, new):
         it["analysis_choices"] = new["analysis_choices"]
     d = new.get("doe") or {}
     if d.get("factors"):
-        it["doe"]["factors"] = d["factors"]
+        if all(f.get("what") == "via" for f in d["factors"]):
+            # the via's wall said again: it replaces the via's factor, the others stay
+            it["doe"]["factors"] = [f for f in it["doe"].get("factors") or [] if f.get("what") != "via"] + d["factors"]
+        else:
+            it["doe"]["factors"] = d["factors"]
+    nv = new.get("via")
+    if nv:
+        # a via: what the follow-up says of it replaces that part
+        v = copy.deepcopy(it.get("via") or {"options": {}, "factors": [], "said": {}, "used": set(), "wall_spans": [],
+                                             "paste": False, "ar": None, "responses": False})
+        v["options"].update(nv["options"])
+        v["said"].update(nv["said"])
+        if nv["factors"]:
+            v["factors"] = nv["factors"]
+        elif "plating_um" in nv["options"]:
+            # one wall said: no study of the wall any more
+            v["factors"] = []
+            it["doe"]["factors"] = [f for f in it["doe"].get("factors") or [] if f.get("what") != "via"]
+        v["paste"] = bool(v.get("paste") or nv.get("paste"))
+        it["via"] = v
+        it["paste"] = bool(it.get("paste") or new.get("paste"))
+        for k in ("electrical", "via"):
+            if k not in it["analyses"]:
+                it["analyses"].append(k)
     for k in ("steps", "step"):
         if d.get(k):
             it["doe"][k] = d[k]

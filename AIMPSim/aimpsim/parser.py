@@ -25,6 +25,7 @@ import re
 from . import design as DZ
 from . import lexicon_data as L
 from . import matprops as MP
+from . import via as VIA
 from .numbers import as_content, quantities, to_um
 from .phonetic import has_hangul, squash
 from .textnorm import normalize
@@ -60,6 +61,9 @@ AFTER = {
             # "10um 에폭시 필름", "a 10 um epoxy film": the number, a material, then the film
             r"|(?:[^\s,.;\d]{1,14}\s*)?(?:필름|film|박막|시트|sheet)(?:에서|에|의|은|는|이|가|을|를|으로|로)?(?![가-힣A-Za-z]))",
 }
+# a calibration whose fitted value a study then uses: "보정한 다음 ... DOE", "calibrate ..., then run a DOE"
+CHAIN = re.compile(r"(?:한\s*)?(?:뒤|다음|후에?|이후)(?:에)?\s|그\s*값으로|보정\s*값으로|보정한\s*값|\bthen\b|after\s+(?:that|which)"
+                   r"|afterwards|with\s+the\s+(?:fitted|calibrated)\s+value", re.IGNORECASE)
 PROPERTY_UNITS = {"W/mK": "k", "S/m": "sigma", "S/cm": "sigma", "ohm_m": "sigma", "ohm_cm": "sigma",
                   "ppm/K": "alpha", "GPa": "E", "Pa.s": "mu"}
 BOTH = r"둘\s*다|둘\s*모두|모두|both|each|all\s+of\s+them"
@@ -96,20 +100,27 @@ def _ctx(text, q):
     return None
 
 
-def parse(text, lex):
+def parse(text, lex, via_open=False):
     raw = text or ""
     lang = "ko" if has_hangul(raw) else "en"
     t = normalize(raw)
     low = t.lower()
     ms = lex.scan(t)
     qs = quantities(t)
+    # a through via: its hole, board, pitch and plating are read first (via.py) - none of them is a particle's
+    # size or a content, and the metal of its wall ("Cu 도금") is not a filler
+    vr = VIA.read(t, qs, via_open)
+    if vr:
+        ms = [m for m in ms if not (m["kind"] in ("material", "material?", "unknown")
+                                    and any(a <= m["start"] < b for a, b in vr["wall_spans"]))]
+        qs = [q for i, q in enumerate(qs) if i not in vr["used"]]
     notes = []
     intent = {"lang": lang, "text": raw, "norm": t, "task": None, "matrix": None, "fillers": [], "analyses": [],
               "analysis_choices": [], "quality": None, "auto": False, "directions": None, "orientation": None,
               "dist": None, "parallel": {}, "seeds": None, "seed": None, "rve": {}, "film": None,
               "doe": {"factors": [], "steps": None, "step": None}, "calibration": {"measurements": [], "unknowns": []},
               "optimization": {}, "unresolved": [], "notes": notes, "basis": None, "matrix_pct": None,
-              "orphan": {}}
+              "orphan": {}, "via": vr, "paste": bool(vr and vr["paste"])}
 
     # ---- settings words --------------------------------------------------
     for m in ms:
@@ -522,6 +533,13 @@ def parse(text, lex):
         elif m["kind"] == "analysis_all":
             intent["analysis_choices"].append({"text": m["text"], "keys": ["thermal", "electrical", "dielectric", "cte"]})
 
+    if vr:
+        # the via takes the conductivity of the composite along it
+        for k in ("electrical", "via"):
+            if k not in intent["analyses"]:
+                intent["analyses"].append(k)
+        intent["analysis_choices"] = [c for c in intent["analysis_choices"] if "electrical" not in c["keys"]]
+
     # ---- measurements (calibration) and targets (optimisation) ------------------------
     prop_words = {"k": "thermal", "sigma": "electrical", "eps_r": "dielectric", "alpha": "cte", "E": "cte", "mu": "viscosity"}
     for q in measured:
@@ -590,6 +608,14 @@ def parse(text, lex):
         if cond is not None:
             intent["unresolved"] = [u for u in intent["unresolved"]
                                     if not (u["kind"] == "content" and u.get("value") == cond)]
+            # "Cu at 40 vol% in an epoxy binder measured ...": the sample's content, not the matrix's share, when
+            # every filler has a content of its own (the range of a study)
+            mp_ = intent.get("matrix_pct") or {}
+            if mp_.get("value") is not None and abs(mp_["value"] - cond) < 1e-9 and fillers                     and all(s.get("content") for s in fillers) and not any(
+                        s["content"].get("how") == "derived" for s in fillers):
+                intent["matrix_pct"] = None
+                if matrix is not None:
+                    matrix["content"] = None
         if prop_words.get(prop) and prop_words[prop] not in intent["analyses"]:
             intent["analyses"].append(prop_words[prop])
     # a word that could name two analyses ("conductivity") is settled by a measurement's unit (W/mK)
@@ -650,6 +676,13 @@ def parse(text, lex):
         if s.get("size_range") or s.get("size_levels"):
             intent["doe"]["factors"].append({"filler": i, "what": "size", "range": s.get("size_range"),
                                              "levels": s.get("size_levels")})
+    if vr and vr["factors"]:
+        intent["doe"]["factors"] += vr["factors"]
+        if intent["task"] in (None, "structure"):
+            intent["task"] = "doe"
+    # a calibration, then a study with the fitted value: one after the other
+    if intent["task"] == "calibration" and intent["doe"]["factors"] and (vr or CHAIN.search(t)):
+        intent["task"] = "cal_doe"
     if intent["seed"] is None:
         m = re.search(r"(?:seed|시드)\s*(\d+)\s*~\s*(\d+)", low)
         if m:

@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.3-8250df" alt="version 0.3.3">
+  <img src="https://img.shields.io/badge/version-0.3.4-8250df" alt="version 0.3.4">
   <a href="https://github.com/HyoseokByun-opt/MPSim"><img src="https://img.shields.io/badge/MPSim-5.6.6-0b62c4" alt="MPSim 5.6.6 inside"></a>
   <img src="https://img.shields.io/badge/local%20model-Qwen3.5--2B%20%C2%B7%20offline-6e40c9" alt="local model Qwen3.5-2B, offline">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-555555" alt="Windows 10 | 11 x64">
@@ -96,6 +96,8 @@ alone, as in 0.1.
 | Design | "에폭시 필름에서 알루미나를 가장 적게 넣고 z방향 열전도도 3 W/mK가 되는 크기와 배합비율", "the least filler for k 5 W/mK, sizes 1-30 um, max 70 vol%" | a DOE over what is to be found, then the recipe (see Design requests) |
 | Interface resistances | "필러-레진, 필러-필러간 열저항은 1E-8", "interface resistance 2e-8", "1.5x10^-8 m2K/W" | R_int and R_c on every filler |
 | Comparisons | "알루미나랑 질화붕소 중 어느 쪽이 ...", "alumina vs boron nitride" | each on its own (separate runs), never one mixture; asked first |
+| Through vias | "1.8T 기판에 홀 100um, pitch 300um", "도금 두께 5, 10, 15, 20, 25um", "AR 18:1", "Cu paste로 채운 관통 비아", "GSG", "S21 at 20 GHz" | MPSim's through-via analysis; the hole, board, pitch and plating are the via's, never a particle's size (see below) |
+| A calibration, then a study | "...비저항이 5E-5 Ω·cm로 측정됐어. 접촉저항을 보정한 다음 ... DOE", "calibrate ..., then run a DOE" | the calibration, then the DOE with the fitted value, then a summary of the study |
 
 **Contents.** A number with a percent sign or word (%, 퍼센트, 프로, percent) is a percent. A number of 1 or less
 without a unit is a fraction (0.55 → 55 %); a number above 1 and up to 100 without a unit, said of a material, is a
@@ -290,6 +292,62 @@ a value to be met (1 W/m·K) ends at 0.993 W/m·K true.
   W/mK") is the measurement, not the material's. A conductivity measured in-plane ("면내 열전도도") is fitted along
   x, otherwise through the thickness.
 - R_c follows R_int (R_c = 2·R_int) on touching particles, as MPSim recommends, unless R_c is calibrated itself.
+- A contact resistance asked for with electrical data ("접촉저항 보정" with a resistivity or a conductivity) is the
+  electrical contact resistance R_c,e of MPSim 5.7.0, on the faces where the particles touch (before 0.3.4 the
+  particles' conductivity was fitted instead); so is the unknown of a paste when none is named.
+
+## A through via, from the calibration to the results
+
+A via word (비아, 관통홀, 스루홀, through via, through hole, PTH, hybrid filling) asks for MPSim's through-via
+analysis (Simulation → Conduction → Through via, with the electrical conductivity). English "via" is also a
+preposition: it counts only with a via word beside it (hole, plating, pitch, board, impedance, paste).
+
+- **A via's lengths are not particles'.** Before the rules read contents and sizes, the via takes its own numbers:
+  the hole ("홀 100um", "100 um hole"), the board ("1.8T", "1.8 mm board"; with "AR 18:1" and the hole the board
+  follows, and the other way round), the pitch ("pitch 300um"), the plating ("도금 20um"; a range or a list -
+  "5, 10, 15, 20, 25 um" - is a DOE factor, `options.via.plating_um`, at the levels said), the return vias (GSG, one,
+  4 or 8 around) and the frequency results are read at ("20 GHz"). The wall's metal ("Cu 도금", "copper plating") and
+  "AR" are never a filler, and these parts stand as the rules read them when the local model reads the request.
+- **What is not said.** The hole and the board are asked; the plating is asked with 20 µm recommended. The rest takes
+  these values, marked * in the summary with their sources: a pitch of 300 µm with 4 return vias around it; a
+  laminate εr of 3.37 and tan δ of 0.002 (J. Temga et al., *Sensors* **24**, 714 (2024),
+  [doi:10.3390/s24020714](https://doi.org/10.3390/s24020714)); DC – 40 GHz, read at 10 GHz; a wall 0.8 as thick in the
+  middle of the hole as at its ends from an aspect ratio of 15 (G. L. Fisher et al., *Trans. IMF* **68**, 50 (1990),
+  [doi:10.1080/00202967.1990.11870866](https://doi.org/10.1080/00202967.1990.11870866)), uniform below.
+- **A paste** ("paste", "페이스트", "소결"): its conducting particles (σ > 10⁵ S/m) may overlap - the necks of the
+  cure (M. Inoue et al., *J. Smart Process.* **5**, 300 (2016),
+  [doi:10.7791/jspmee.5.300](https://doi.org/10.7791/jspmee.5.300)) - on a fixed grid of voxels of d/16 and a box of 8
+  (Fast), 12 (Standard) or 20 (Accurate) diameters: for Cu of 6.38 µm, 128³, 192³ or 320³. The same paste in five
+  realisations per box gave σ_z 2.38, 2.12, 2.00 and 2.05 MS/m in boxes of 8, 12, 16 and 20 diameters: 8 is 15 % high,
+  12 is within 5 %, so a paste never runs at Fast. The calibration and the DOE share the grid, since the fitted value
+  holds for the grid it was fitted on.
+- **A calibration, then the DOE.** Measurements and a range in one request, with the order said ("보정한 다음",
+  "then") or a via, run one after the other:
+  1. the calibration at the content measured, until it reaches the data (as above: ranges or unknowns changed);
+  2. the fitted value (and the entries linked to it) goes into the case and the whole DOE runs;
+  3. when it is done, the conversation sums it up: every response that changes, with its range and the effect of
+     each factor (the spread of its level means); a table of the two that change most against the first two factors
+     (content × plating); and the responses that are the same in every case to within 1 % (Z0, S21 at 10 GHz).
+
+  "멈춰" stops it at whatever step it is in.
+- **Follow-ups** in a via conversation are read as the via's without a via word: "피치는 250um로" changes the pitch,
+  "도금은 20um 하나로" ends the study of the wall, "도금 10~30um" replaces it.
+- **Stated up front** in the summary's "Via model" row: the via body only, as a quasi-TEM line - no pads, antipads,
+  planes or transitions to traces (a 3D full-wave problem).
+
+Run end to end in a browser (MPSim 5.7.0, the bundled model, a laptop with 18 threads and 16 GB; no browser errors),
+the example below went from Run to the summary in 34 minutes without a further click: the calibration (10 minutes,
+R_c,e = 1.68×10⁻¹⁴ Ω·m², 95 % 0.86-2.4×10⁻¹⁴, the RVE at 1.999 MS/m against the measured 2.0) and the DOE of 30 cases
+(3 at a time, none failed). The Korean request gave the same numbers in 33 minutes. One via, at DC: 23.3 → 13.9 mΩ
+from 30 to 55 vol% Cu with a 5 µm wall and 5.69 → 5.34 mΩ with 25 µm; the paste carries up to 40 % of the current
+(55 vol%, 5 µm) and nothing at 30 vol%, which does not connect along z in a box of 12 diameters; at 10 GHz 148.4 mΩ,
+Z0 60.42 Ω and S21 −0.086 dB in every case.
+
+<p align="center">
+  <img src="docs/images/aimpsim_via.png" alt="The AI tab at the end of the via example: the DC resistance and the paste's share of the current against the Cu content and the plating" width="90%">
+</p>
+
+Example (in the AI tab's list; the Korean one is the same request): "A Cu paste of spherical Cu 6.38 um at 40 vol% in an epoxy binder measured 5E-5 ohm cm. Calibrate the particle contact resistance, then fill a through via with it - 1.8 mm board, 100 um hole, 300 um pitch, Cu plating 5, 10, 15, 20, 25 um - and run a DOE of the Cu content 30, 35, 40, 45, 50, 55 vol% for the resistance and impedance".
 
 ## The local model
 
@@ -322,7 +380,7 @@ instead: `AIMPSim\GET_AI_MODEL.bat --model qwen3.5-4b` (`--list` shows the other
 ## Verification
 
 The AI tab is checked on the inputs it makes, not on the analyses (those are MPSim's, checked by its own self-test,
-`5_SELF_TEST.bat`, 93 problems with known solutions). Every request below has its answer written down; a reading is
+`5_SELF_TEST.bat`, 95 problems with known solutions). Every request below has its answer written down; a reading is
 right, asked (left open and asked - safe), or wrong (read as something else).
 
 **Requests as people write them** (`python AIMPSim/tests/freeform.py`, with `--llm <llama-server> <model>` for the
@@ -344,7 +402,9 @@ any change came from them (0.2.0): Qwen3.5-2B 25 / 3 / 2, Qwen3.5-4B 27 / 3 / 0,
 Reading with the model takes 3-4 s per request (median).
 
 **Requests written to rule** (they must not get worse with the model):
-- `python AIMPSim/tests/run_tests.py` - 118 hand-written requests, 98 inputs validated by MPSim, conversations of
+- `python AIMPSim/tests/run_tests.py` - 124 hand-written requests (0.3.4: six of through vias and pastes), 103 inputs
+  validated by MPSim, the via example to its MPSim inputs (options, overlap and grid, R_c,e then 30 cases), its
+  follow-ups and the study's summary, conversations of
   several messages (rules alone and model-first through a stand-in server), the checks on made-up model answers
   (invented materials, numbers and material values, broken answers, no answer), and since 0.3.0:
   - design requests in five phrasings, Korean and English, each planned into a DOE whose every case MPSim accepts,
@@ -353,8 +413,9 @@ Reading with the model takes 3-4 s per request (median).
   - the calibration checks: the precheck on data an interfacial resistance cannot reach and on data it can, and the
     next round after a result that did not reach the data.
 
-  Rules alone: 118/118 and every added test passed. Read through Qwen3.5-2B: 118/118 (98/98 inputs accepted by
-  MPSim), every added test passed. Through Qwen3.5-4B (0.2.0): 118/118.
+  Rules alone: 124/124 (103/103 inputs accepted by MPSim) and every added test passed. Read through Qwen3.5-2B:
+  124/124 (104/104 inputs accepted by MPSim), every added test passed. Through Qwen3.5-4B (0.2.0, the 118 then):
+  118/118.
 - `python AIMPSim/tests/exhaustive.py` - generated requests, each with its answer: every alias of every material,
   every way of writing a content, size, shape, analysis, DOE, calibration, optimisation goal and setting, pairs of
   fillers, Korean word orders and particles, typing errors made from every alias, and random combinations. Rules
@@ -404,11 +465,11 @@ answer says so instead of suggesting a higher content.
 
 ## Installation
 
-**PC without internet.** Download `AIMPSim-0.3.3-offline-win64.zip` from the
+**PC without internet.** Download `AIMPSim-0.3.4-offline-win64.zip` from the
 [latest release](https://github.com/HyoseokByun-opt/AIMPSim/releases/latest): MPSim with the AI tab, the model and its
 server, the Python runtime, every wheel and openEMS. Unzip to a short path such as `C:\AIMPSim`, run
 `1_INSTALL_OFFLINE.bat`, then `2_RUN_LOCAL.bat`. For the larger model, unzip
-`AIMPSim-0.3.3-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
+`AIMPSim-0.3.4-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
 
 **PC with internet and conda.**
 

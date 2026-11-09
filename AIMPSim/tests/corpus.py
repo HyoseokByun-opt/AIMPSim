@@ -180,4 +180,28 @@ CASES = [
     ("epoxy에 silica 60% 열전도도", {"matrix": "epoxy", "fillers": [("sio2", 60, "*", "*", "*")], "analyses": {"thermal"}}),
     ("Al2O3 55vol% 에폭시 열전도도", {"matrix": "epoxy", "fillers": [("al2o3", 55, "vol", "*", "*")]}),
     ("silicone에 AlN 50% k값", {"matrix": "silicone", "fillers": [("aln", 50, "*", "*", "*")], "analyses": {"thermal"}}),
+    # ---- Q. a through via filled with a paste (via.py): its lengths are not sizes or contents ------------------
+    ("에폭시 바인더에 구형 Cu 입경 6.38um를 40vol% 넣은 Cu paste의 비저항이 5E-5 Ω·cm로 측정됐어. 이 값으로 입자 접촉저항을 보정한 "
+     "다음, 1.8T 기판에 홀 100um, pitch 300um로 뚫고 Cu 도금한 뒤 이 paste로 채운 관통 비아에서 Cu 함량 30, 35, 40, 45, 50, 55 vol%와 "
+     "도금 두께 5, 10, 15, 20, 25um로 DOE 해서 저항과 임피던스 구해줘",
+     {"matrix": "epoxy", "fillers": [("cu", "*", "vol", "sphere", 6.38)], "analyses": {"electrical", "via"}, "task": "cal_doe",
+      "doe": [("content", 30, 55, 6), ("via", 5, 25, 5)], "measurements": [("sigma", 2e6, 40)], "unknowns": ["r_contact"],
+      "ready": True}),
+    ("A Cu paste of spherical Cu 6.38 um at 40 vol% in an epoxy binder measured 5E-5 ohm cm. Calibrate the particle contact "
+     "resistance, then fill a through via with it - 1.8 mm board, 100 um hole, 300 um pitch, Cu plating 5, 10, 15, 20, 25 um - "
+     "and run a DOE of the Cu content 30, 35, 40, 45, 50, 55 vol% for the resistance and impedance",
+     {"matrix": "epoxy", "fillers": [("cu", "*", "vol", "sphere", 6.38)], "analyses": {"electrical", "via"}, "task": "cal_doe",
+      "doe": [("content", 30, 55, 6), ("via", 5, 25, 5)], "measurements": [("sigma", 2e6, 40)], "ready": True}),
+    ("에폭시에 구형 은 5um 45vol% 페이스트로 채운 비아, AR 18:1, 홀 100um, 도금 20um, 저항과 임피던스",
+     {"matrix": "epoxy", "fillers": [("ag", 45, "vol", "sphere", 5)], "analyses": {"electrical", "via"}, "task": "run",
+      "ready": True}),
+    ("epoxy with 50 vol% spherical Cu 10 um filling a plated through hole of 0.25 mm in a 3.2 mm board, plating 25 um, "
+     "GSG, S21 at 20 GHz",
+     {"matrix": "epoxy", "fillers": [("cu", 50, "vol", "sphere", 10)], "analyses": {"electrical", "via"}, "task": "run",
+      "ready": True}),
+    ("에폭시에 구형 Cu 10um 40~55vol%로 채운 관통홀 비아, 1.6T, 홀 0.2mm, 도금 15um로 DOE, 저항",
+     {"matrix": "epoxy", "fillers": [("cu", "*", "vol", "sphere", 10)], "analyses": {"electrical", "via"}, "task": "doe",
+      "doe": [("content", 40, 55, "*")]}),
+    # "via" as a preposition is not a via
+    ("epoxy with 50 vol% silica, thermal conductivity computed via the RVE", {"matrix": "epoxy", "analyses": {"thermal"}}),
 ]

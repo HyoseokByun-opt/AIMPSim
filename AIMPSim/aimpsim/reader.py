@@ -27,6 +27,7 @@ import json
 import re
 
 from . import lexicon_data as L
+from . import via as VIA
 from .phonetic import has_hangul, squash
 
 ANALYSIS_KEYS = list(L.ANALYSES.keys())
@@ -1021,9 +1022,40 @@ def build_intent(js, text, lex, rule_it, all_text=None):
         if not any(re.search(re.escape(n) + r"\s*" + re.escape(_fmt(mp)) + r"\s*(?:%|퍼|프로|vol|wt)", norm, re.IGNORECASE)
                    for n in mx_names if n):
             it["matrix_pct"] = None
+    _via_part(it, rule_it, rep)
     it["llm_report"] = rep
     it["lang"] = lang
     return it, rep
+
+
+def _via_part(it, rule_it, rep=None):
+    """A through via is read by the rules alone (via.py): its options, its DOE factor, the paste and a
+    calibration followed by the study stand as the rules read them, and none of its lengths is a particle's size."""
+    vr = rule_it.get("via")
+    if not vr:
+        return
+    it["via"], it["paste"] = vr, rule_it.get("paste")
+    for k in ("electrical", "via"):
+        if k not in it["analyses"]:
+            it["analyses"].append(k)
+    if rep is not None:
+        # the analyses now stand as the rules read them: no note that the model read them otherwise
+        rep["differs"] = [d for d in rep["differs"] if not (d[0] in ("analyses", "analyses_rules")
+                                                             and set(d[1] or []) | set(d[2] or []) <= set(it["analyses"]))]
+    facs = it["doe"].setdefault("factors", [])
+    for f in vr["factors"]:
+        if f not in facs:
+            facs.append(copy.deepcopy(f))
+    vals = VIA.numbers(vr)
+    rules = {f.get("id"): f for f in rule_it.get("fillers") or []}
+    for f in it["fillers"]:
+        r = rules.get(f.get("id")) or {}
+        if f.get("size_um") is not None and round(float(f["size_um"]), 6) in vals and f["size_um"] != r.get("size_um"):
+            f["size_um"], f["size_src"], f["size_range"] = r.get("size_um"), r.get("size_src"), r.get("size_range")
+    if rule_it.get("task") == "cal_doe":
+        it["task"] = "cal_doe"
+    elif vr["factors"] and it.get("task") in (None, "run", "structure"):
+        it["task"] = "doe"
 
 
 def _not_measured(s, rule_it, rep):

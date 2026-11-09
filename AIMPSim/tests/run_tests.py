@@ -816,6 +816,56 @@ def test_loops(lex, host):
     return errs
 
 
+def test_via(lex, host):
+    """A through via filled with a paste, from the AI tab's example to its MPSim inputs: the via's options, the
+    paste's overlap and grid, the calibration of R_c,e followed by the DOE, follow-ups, and the study's summary."""
+    from aimpsim import loop as LP
+    from aimpsim.web import Assistant
+    errs = []
+    planner = Planner(lex, host)
+    text = next(t for t, _ in CASES if t.startswith("에폭시 바인더에 구형 Cu 입경 6.38um"))
+    r = planner.resolve(parse(text, lex), {"_auto": True})
+    p = r["payload"] or {}
+    f = p.get("form") or {}
+    v = (f.get("options") or {}).get("via") or {}
+    want = {"hole_d_um": 100.0, "length_mm": 1.8, "pitch_um": 300.0, "throw": 0.8, "returns": "coax4", "eps_r": 3.37}
+    if p.get("kind") != "cal_doe" or any(v.get(k) != x for k, x in want.items()):
+        errs.append(f"via example: kind {p.get('kind')}, via {v}")
+    ph = (f.get("phases") or [{}])[0]
+    if not ph.get("overlap") or f.get("rve", {}).get("voxel_um") != 0.4 or f.get("rve", {}).get("L_um") != 76.8:
+        errs.append(f"via example paste: overlap {ph.get('overlap')}, rve {f.get('rve')}")
+    pars = {q["path"]: q for q in (p.get("doe") or {}).get("parameters") or []}
+    if pars.get("options.via.plating_um", {}).get("values") != [5.0, 10.0, 15.0, 20.0, 25.0]             or pars.get("phases.0.fraction.value", {}).get("steps") != 6 or (p.get("doe") or {}).get("n_cases") != 30:
+        errs.append(f"via example DOE: {p.get('doe')}")
+    unk = [u.get("path") for u in (p.get("cal") or {}).get("unknowns") or []]
+    st = [s for m in (p.get("cal") or {}).get("measurements") or [] for s in m.get("set") or []]
+    if unk != ["phases.0.rc_elec"] or st != [{"path": "phases.0.fraction.value", "value": 40.0}]:
+        errs.append(f"via example calibration: unknowns {unk}, set {st}")
+    if r["problems"] or (host.get("validate") and host["validate"](f)):
+        errs.append(f"via example refused: {r['problems']} {host.get('validate') and host['validate'](f)}")
+    # follow-ups in the conversation: the pitch changed, then one wall instead of the range
+    a = Assistant(host)
+    r1 = a.interpret(text, new=True)
+    r2 = a.interpret("피치는 250um로 바꿔줘", r1["session_id"])
+    v2 = ((r2.get("payload") or {}).get("form") or {}).get("options", {}).get("via") or {}
+    if v2.get("pitch_um") != 250.0 or v2.get("hole_d_um") != 100.0:
+        errs.append(f"via follow-up pitch: {v2}")
+    r3 = a.interpret("도금은 20um 하나로", r1["session_id"])
+    p3 = r3.get("payload") or {}
+    paths = [q["path"] for q in (p3.get("doe") or {}).get("parameters") or []]
+    if (p3.get("form") or {}).get("options", {}).get("via", {}).get("plating_um") != 20.0 or "options.via.plating_um" in paths:
+        errs.append(f"via follow-up wall: {paths} {(p3.get('form') or {}).get('options', {}).get('via')}")
+    # the study's summary: what changes, by which factor, and what does not
+    study = {"parameters": [{"path": "phases.0.fraction.value", "label": "Cu: content", "unit": "%"},
+                            {"path": "options.via.plating_um", "label": "Via wall plating", "unit": "µm"}]}
+    rows = [{"state": "done", "values": {"phases.0.fraction.value": c, "options.via.plating_um": w},
+             "metrics": {"via_R": 100.0 / (w + 0.1 * c), "via_Z0": 60.4}} for c in (30, 40, 50) for w in (5, 20)]
+    s = LP.study_summary(study, rows, [{"key": "via_R", "label": "R", "unit": "mΩ"}, {"key": "via_Z0", "label": "Z0", "unit": "Ω"}], "ko")
+    if [c["key"] for c in s["constant"]] != ["via_Z0"] or s["effects"][0]["by"][0]["path"] != "options.via.plating_um"             or len(s["tables"]) != 1 or s["tables"][0]["cells"][0][0] != 100.0 / 8.0:
+        errs.append(f"study summary: {s}")
+    return errs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="")
@@ -880,7 +930,7 @@ def main():
         conv_errs = test_conversation(host)
         for e in conv_errs:
             print("CONV  " + e)
-        des_errs = test_design(lex, host, read) + test_matprops(lex, host) + test_calibration_ai(lex, host) + test_loops(lex, host)
+        des_errs = test_design(lex, host, read) + test_matprops(lex, host) + test_calibration_ai(lex, host) + test_loops(lex, host)             + test_via(lex, host)
         for e in des_errs:
             print("DESIGN " + e)
     print(f"\n{n - bad}/{n} requests read as expected"

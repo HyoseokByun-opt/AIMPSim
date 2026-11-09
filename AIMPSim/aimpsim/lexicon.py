@@ -336,6 +336,8 @@ class Lexicon:
         t = toks[i][0]
         if has_hangul(t) and self.strip(t).endswith(L.NOT_MATERIAL_KO):
             return False                 # 예전해석에서, 실험조건: words of the work, not a material
+        if has_hangul(t) and re.fullmatch(r"(?:값|양|것|때|곳)(?:으로|으로는|으로도|을|이|은|는|에|의|도|만|로)?", t):
+            return False                 # "이 값으로": a word of one syllable with its particle (left unstripped)
         if has_hangul(t) and (self.strip_particles(t) in L.SIZE_CLASS_KO or self.strip(t) in L.SIZE_CLASS_KO
                               or self.strip(t) + "입자" in L.SIZE_CLASS_KO):
             return False                 # 대입자, 소입자, 미세입자: a class of sizes, not a material

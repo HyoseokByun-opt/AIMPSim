@@ -24,11 +24,13 @@
     "실리콘에 판상 질화붕소 30wt% 종횡비 10, 열전도도 3방향",
     "에폭시에 알루미나 10마이크로 구형 40~60% 범위로 5단계 DOE, 열전도도",
     "에폭시에 실리카 20%일 때 0.45 W/mK, 40%일 때 0.8 W/mK 측정됐어. 계면저항 보정해줘",
+    "에폭시 바인더에 구형 Cu 입경 6.38um를 40vol% 넣은 Cu paste의 비저항이 5E-5 Ω·cm로 측정됐어. 이 값으로 입자 접촉저항을 보정한 다음, 1.8T 기판에 홀 100um, pitch 300um로 뚫고 Cu 도금한 뒤 이 paste로 채운 관통 비아에서 Cu 함량 30, 35, 40, 45, 50, 55 vol%와 도금 두께 5, 10, 15, 20, 25um로 DOE 해서 저항과 임피던스 구해줘",
     "에폭시에 알루미나 함량을 40~60%로 바꿔가며 열전도도가 최대가 되는 조건 찾아줘",
     "10um 에폭시 필름에서 알루미나를 가장 적게 넣고 z방향 열전도도 3 W/mK가 되는 크기와 배합비율 알려줘. topcut 3um, 가장 작은 입자 200nm, 최대 62vol%, 분포는 고려하지 않음, 필러-레진·필러-필러 열저항 1E-8, 비슷하면 점도 낮고 패킹 잘되는 조합",
     "에폭시에 구형 알루미나 10um 50vol%, 알루미나 열전도도는 라이브러리보다 10 낮게 해서 열전도도",
     "epoxy with 60 vol% spherical silica 4 um, thermal conductivity and CTE, accurate",
     "silicone with 50 vol% alumina 10 um, permittivity, quick, 2 runs at a time",
+    "A Cu paste of spherical Cu 6.38 um at 40 vol% in an epoxy binder measured 5E-5 ohm cm. Calibrate the particle contact resistance, then fill a through via with it - 1.8 mm board, 100 um hole, 300 um pitch, Cu plating 5, 10, 15, 20, 25 um - and run a DOE of the Cu content 30, 35, 40, 45, 50, 55 vol% for the resistance and impedance",
   ];
 
   async function post(url, body) {
@@ -184,6 +186,7 @@
         return `<div class="ai-msg"><div class="ai-card ai-note${m.loop ? " ai-loopmsg" : ""}">${m.note}${opts}</div></div>`;
       }
       if (m.design) return `<div class="ai-msg">${designCard(m.design, m.spec)}</div>`;
+      if (m.study) return `<div class="ai-msg">${studyCard(m.study)}</div>`;
       if (m.check) return `<div class="ai-msg">${checkCard(m.check)}</div>`;
       return `<div class="ai-msg">${card(m.reply, i === S.msgs.length - 1 && !m.done, m.done)}</div>`;
     }).join("");
@@ -257,6 +260,7 @@
     if (!r || !r.payload) return;
     const h = H(), p = r.payload;
     h.applyForm(p.form);
+    if (p.cal && p.doe) { h.setCal(p.cal); h.setDoe(p.doe); h.setTab("calibration"); return; }
     if (p.doe) { h.setDoe(p.doe); h.setTab("doe"); return; }
     if (p.cal) { h.setCal(p.cal); h.setTab("calibration"); return; }
     h.setTab("structure"); h.setCenter("vis");
@@ -298,6 +302,15 @@
         }
         S.msgs.push({ role: "ai", note: `${esc(m.done)} <button class="btn sm" data-aigo="doe,doe">${L("DOE 결과", "DOE results")}</button>` });
         loopTick(3000);
+      } else if (p.kind === "cal_doe") {
+        // the calibration first; when it reaches the data, its value goes into the case and the DOE runs (calNext)
+        h.setCal(p.cal);
+        h.setTab("calibration");
+        const jid = await h.runCal();
+        if (jid) { addLoop({ kind: "cal", job: jid, form: p.form, cal: p.cal, round: 0, tried: [p.cal.plan_keys || ""], wait: "cal", then: p.doe }); loopTick(3000); }
+        m.done = L(`보정을 시작했습니다. 측정에 닿는 값을 찾으면 그 값을 넣고 DOE ${p.doe.n_cases}케이스를 이어서 실행하고, 끝나면 결과를 여기에 정리합니다.`,
+          `The calibration has started. When it finds the value that reaches the data, that value goes into the case, the DOE of ${p.doe.n_cases} cases runs next and its results are summed up here.`);
+        S.msgs.push({ role: "ai", note: `${esc(m.done)} <button class="btn sm" data-aigo="calibration,cal">Calibration</button>` });
       } else if (p.kind === "calibration") {
         h.setCal(p.cal);
         h.setTab("calibration");
@@ -367,12 +380,13 @@
       if (lp.wait === "doe") {
         const st = await doeState(lp.doe);
         if (!st.all) {
-          if (!tailReady(lp, st)) return;
+          // a study summed up at its end waits for every case; a round of a design or an optimisation does not
+          if (lp.kind === "study" || !tailReady(lp, st)) return;
           loopNote(L(`케이스 ${st.n - st.fin}개가 다른 케이스보다 훨씬 오래 걸려(예: 구조 생성), 끝난 ${st.fin}개로 이번 라운드를 판단합니다. 그 케이스는 계속 돌고, 끝나면 다음 라운드에 들어갑니다.`,
             `${st.n - st.fin} run(s) take far longer than the others (a structure still being packed, say): this round goes on with the ${st.fin} finished. They keep running and join the next round when done.`));
         }
         lp.tailT = null;
-        if (lp.kind === "design") await designNext(lp); else await optNext(lp);
+        if (lp.kind === "design") await designNext(lp); else if (lp.kind === "study") await studyDone(lp); else await optNext(lp);
       } else if (lp.wait === "check" || lp.wait === "cal") {
         const j = await getJ(`/api/jobs/${lp.job}`);
         if (["failed", "stopped", "cancelled"].includes(j.state)) {
@@ -442,6 +456,63 @@
       tell({ role: "ai", note: `${esc(r.text || "")} <button class="btn sm" data-aigo="optimization,opt">Optimization</button>`, loop: true }, r.text);
     }
   }
+  // the fitted values into the case: each unknown's path and the entries it is linked to ("2*x")
+  function withFit(form, unknowns, result) {
+    const f = JSON.parse(JSON.stringify(form));
+    const set = (path, v) => {
+      const ks = path.split("."); let o = f;
+      for (let i = 0; i < ks.length - 1; i++) { const k = /^\d+$/.test(ks[i]) ? +ks[i] : ks[i]; if (o[k] == null) o[k] = {}; o = o[k]; }
+      o[ks[ks.length - 1]] = v;
+    };
+    const got = [];
+    (result.unknowns || []).forEach((s) => {
+      if (s.map == null || !isFinite(s.map)) return;
+      set(s.path, s.map);
+      got.push(`${s.label || s.path} = ${fmt(s.map, 3)}${s.unit ? " " + s.unit : ""}`);
+      const u = (unknowns || []).find((x) => x.path === s.path) || {};
+      (u.links || []).forEach((ln) => {
+        const m = String(ln.expr || "x").replace(/\s/g, "").match(/^(?:([\d.eE+-]+)\*)?x$/);
+        if (m) set(ln.path, (m[1] ? Number(m[1]) : 1) * s.map);
+      });
+    });
+    return { form: f, got };
+  }
+  // the DOE that follows a calibration: started with the fitted value in its case
+  async function thenDoe(lp, result) {
+    const h = H(), fit = withFit(lp.form, lp.cal && lp.cal.unknowns, result || {});
+    if (!fit.got.length) { S.msgs.push({ role: "ai", error: L("보정값을 읽지 못해 DOE를 시작하지 않았습니다.", "The fitted value could not be read: the DOE was not started.") }); return; }
+    h.applyForm(fit.form);
+    h.setDoe(lp.then);
+    const before = h.state.doeId;
+    await h.createDoe();
+    const id = h.state.doeId;
+    if (!id || id === before) { S.msgs.push({ role: "ai", error: L("DOE를 만들지 못했습니다 (MPSim 메시지 참고).", "The DOE was not created (see MPSim's message).") }); return; }
+    addLoop({ kind: "study", doe: id, state: {}, wait: "doe" });
+    const txt = L(`보정값 ${fit.got.join(", ")}을(를) 케이스에 넣고 DOE ${lp.then.n_cases}케이스를 시작했습니다. 끝나면 결과를 정리합니다.`,
+      `${fit.got.join(", ")} went into the case and the DOE of ${lp.then.n_cases} cases has started; its results are summed up when it is done.`);
+    tell({ role: "ai", note: `${esc(txt)} <button class="btn sm" data-aigo="doe,doe">${L("DOE 결과", "DOE results")}</button>`, loop: true }, txt);
+    if (h.pollRuns) h.pollRuns();
+  }
+  async function studyDone(lp) {
+    const r = await post("/api/ai/study/summary", { doe_id: lp.doe, lang: S.lang });
+    endLoop(lp);
+    // the study in the DOE tab, and its summary on screen: the end of the request
+    try { await H().openDoe(lp.doe); } catch (e) { }
+    S.msgs.push({ role: "ai", study: r, doeId: lp.doe });
+    try { H().setTab("ai"); H().setCenter("ai"); } catch (e) { }
+  }
+  function studyCard(r) {
+    const tabs = (r.tables || []).map((tb) => {
+      const head = `<tr><th>${esc(tb.rows.label)} \\ ${esc(tb.cols.label)}</th>${tb.cols.levels.map((c) => `<th>${fmt(c, 4)}${tb.cols.unit ? " " + esc(tb.cols.unit) : ""}</th>`).join("")}</tr>`;
+      const body = tb.rows.levels.map((a, i) => `<tr><th>${fmt(a, 4)}${tb.rows.unit ? " " + esc(tb.rows.unit) : ""}</th>${tb.cells[i].map((v) => `<td>${v == null ? "-" : fmt(v, 4)}</td>`).join("")}</tr>`).join("");
+      return `<div class="hint" style="margin-top:8px"><b>${esc(tb.label)}</b>${tb.unit ? ` (${esc(tb.unit)})` : ""}</div><table class="ai-sum ai-grid">${head}${body}</table>`;
+    }).join("");
+    const eff = (r.effects || []).map((e) => `<tr><td>${esc(e.label)}</td><td>${fmt(e.min, 4)} – ${fmt(e.max, 4)} ${esc(e.unit)}${e.by.length ? `<div class="ai-src">${esc(L("영향 (수준 평균의 차): ", "effect (spread of the level means): "))}${e.by.map((b) => `${esc(b.label)} ${fmt(b.spread, 3)}`).join(" · ")}</div>` : ""}</td></tr>`).join("");
+    const same = (r.constant || []).map((c) => `<tr><td>${esc(c.label)}</td><td>${fmt(c.value, 4)} ${esc(c.unit)} <span class="ai-src">${esc(L("모든 케이스에서 같음 (1 % 이내)", "the same in every case (within 1 %)"))}</span></td></tr>`).join("");
+    return `<div class="ai-card"><div class="ai-head">${L("DOE 결과 정리", "The study's results")} · ${r.n_done}/${r.n_cases} ${L("케이스", "cases")}</div>
+      <table class="ai-sum">${eff}${same}</table>${tabs}
+      <div class="row gap ai-actions"><button class="btn sm" data-aigo="doe,doe">${L("DOE 결과", "DOE results")}</button></div></div>`;
+  }
   async function calNext(lp, result, answer) {
     const body = { form: lp.form, cal: lp.cal, result: result || lp.result || {}, tried: lp.tried, round: lp.round, lang: S.lang };
     if (answer) body.answer = answer;
@@ -464,6 +535,8 @@
       return;
     }
     endLoop(lp);      // done or stopped
+    // a calibration that reached the data and a DOE to follow: the DOE with the fitted value
+    if (r.action === "done" && lp.then) await thenDoe(lp, result || lp.result);
   }
   async function loopAnswer(ans, shown, id) {
     const lp = S.loops.find((x) => x.kind === "cal" && x.wait === "answer" && (!id || x.id === id));
@@ -491,8 +564,9 @@
     return S.loops.map((lp) => {
       const what = { doe: L("DOE 케이스 해석 중", "the study's runs are going"), check: L("추천 조합 확인 해석 중", "the recipe's check run is going"),
         cal: L("보정 해석 중", "the calibration is going"), answer: L("답을 기다리는 중", "waiting for your answer") }[lp.wait] || "";
-      const kind = { design: L("설계", "Design"), opt: L("최적화", "Optimisation"), cal: L("보정", "Calibration") }[lp.kind] || "";
-      return `<div class="ai-msg"><div class="ai-card ai-note ai-loop">${icon("auto")}<b>${esc(kind)}</b> · ${esc(L("라운드", "round"))} ${(lp.round || 0) + (lp.kind === "cal" ? 1 : 0)} · ${esc(what)}
+      const kind = { design: L("설계", "Design"), opt: L("최적화", "Optimisation"), study: "DOE",
+        cal: lp.then ? L("보정 → DOE", "Calibration → DOE") : L("보정", "Calibration") }[lp.kind] || "";
+      return `<div class="ai-msg"><div class="ai-card ai-note ai-loop">${icon("auto")}<b>${esc(kind)}</b>${lp.kind === "study" ? "" : ` · ${esc(L("라운드", "round"))} ${(lp.round || 0) + (lp.kind === "cal" ? 1 : 0)}`} · ${esc(what)}
         <span class="hint">${esc(L("'멈춰'로 멈추고, 조건을 말하면 다음 라운드부터 반영합니다.", "Type 'stop' to stop; a condition you type applies from the next round."))}</span>
         <button class="btn sm" data-ailoopstop="${esc(lp.id)}">${L("멈추기", "Stop")}</button></div></div>`;
     }).join("");

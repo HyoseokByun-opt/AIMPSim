@@ -62,6 +62,11 @@ def unknown_entry(key, form, i=0, wide=False):
     if key == "r_contact":
         return {"key": key, "path": f"phases.{i}.r_contact", "label": f"{name}: contact resistance R_c",
                 "unit": "m²K/W", "lo": 1e-9, "hi": 1e-4, "scale": "log", "links": []}
+    if key == "rc_elec":
+        # the electrical contact resistance of touching particles (a paste): the range of the Calibration tab
+        return {"key": key, "path": f"phases.{i}.rc_elec", "label": f"{name}: electrical contact resistance R_c,e",
+                "unit": "Ω·m²", "lo": 1e-17 if not wide else 1e-19, "hi": 1e-11 if not wide else 1e-9, "scale": "log",
+                "links": []}
     if key == "filler_k":
         k = float(pp.get("k") or 1.0)
         return {"key": key, "path": f"phases.{i}.props.k", "label": f"{name}: thermal conductivity", "unit": "W/m·K",
@@ -316,7 +321,7 @@ def next_round(form, cal, unknowns, result, tried_keys, lang="en", library=None)
 
 
 # the widest range an unknown is widened to: beyond them a value is not a material's
-_LIMITS = {"r_int": (1e-12, 1e-3), "r_contact": (1e-12, 1e-3), "k": (1e-3, 3000.0), "sigma": (1e-16, 1e9),
+_LIMITS = {"r_int": (1e-12, 1e-3), "r_contact": (1e-12, 1e-3), "rc_elec": (1e-21, 1e-7), "k": (1e-3, 3000.0), "sigma": (1e-16, 1e9),
            "eps_r": (1.0, 1e5), "E": (1e-4, 2000.0), "alpha": (0.0, 500.0), "nu": (0.0, 0.5)}
 
 
