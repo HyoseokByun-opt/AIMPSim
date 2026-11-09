@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.2-8250df" alt="version 0.3.2">
+  <img src="https://img.shields.io/badge/version-0.3.3-8250df" alt="version 0.3.3">
   <a href="https://github.com/HyoseokByun-opt/MPSim"><img src="https://img.shields.io/badge/MPSim-5.6.6-0b62c4" alt="MPSim 5.6.6 inside"></a>
   <img src="https://img.shields.io/badge/local%20model-Qwen3.5--2B%20%C2%B7%20offline-6e40c9" alt="local model Qwen3.5-2B, offline">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-555555" alt="Windows 10 | 11 x64">
@@ -167,13 +167,14 @@ A request that names a target and asks what to use to reach it is a design: "10 
   shows the plan of the base case and of the heaviest corner of the ranges (the finest particles beside the
   coarsest, at the most filler).
 - **Chosen, round by round.** When every case is done, a Gaussian-process surrogate of the target property (MPSim's
-  optimise.py, cross-validated; the realised content of each run, not the asked one) gives, for 1,500 combinations
-  of sizes and share, the lowest content that meets the target with its prediction one standard deviation on the
-  safe side. Of the recipes within 1 vol% of the lowest content, the one of lowest viscosity is recommended when the
-  request prefers low viscosity or good packing. Packing and viscosity are not fitted: φm is the random close
-  packing of the blend (Farr-Groot) and the relative viscosity Krieger-Dougherty with it, the closed forms MPSim's
-  viscosity analysis uses for spheres, evaluated at every candidate. A surrogate that cross-validates weakly
-  (R² below 0.7) does not choose: the run that met the target with the least filler is recommended.
+  optimise.py, cross-validated; the realised content, filler share and particle sizes of each run, not the asked
+  ones) gives, for 1,500 combinations of sizes and share, the lowest content that meets the target with its
+  prediction one standard deviation on the safe side. Of the recipes within 1 vol% of the lowest content, the one of
+  lowest viscosity is recommended when the request prefers low viscosity or good packing. Packing and viscosity are
+  not fitted: φm is the random close packing of the blend (Farr-Groot) and the relative viscosity Krieger-Dougherty
+  with it, the closed forms MPSim's viscosity analysis uses for spheres, evaluated at every candidate. A surrogate
+  that cross-validates weakly (R² below 0.7) does not choose: the run that met the target with the least filler is
+  recommended.
 - **Run until it answers.** After every round the surrogate is judged where the decision is made: the standard
   deviation of its prediction at the recipe, over the slope of the property with the content, is how sure the
   recipe's content is (in vol%).
@@ -403,11 +404,11 @@ answer says so instead of suggesting a higher content.
 
 ## Installation
 
-**PC without internet.** Download `AIMPSim-0.3.2-offline-win64.zip` from the
+**PC without internet.** Download `AIMPSim-0.3.3-offline-win64.zip` from the
 [latest release](https://github.com/HyoseokByun-opt/AIMPSim/releases/latest): MPSim with the AI tab, the model and its
 server, the Python runtime, every wheel and openEMS. Unzip to a short path such as `C:\AIMPSim`, run
 `1_INSTALL_OFFLINE.bat`, then `2_RUN_LOCAL.bat`. For the larger model, unzip
-`AIMPSim-0.3.2-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
+`AIMPSim-0.3.3-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
 
 **PC with internet and conda.**
 

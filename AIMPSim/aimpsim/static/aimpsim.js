@@ -169,6 +169,11 @@
     if (el && el.classList.contains("on")) renderCenter(el);
   }
   function renderCenter(el) {
+    // the conversation follows its end only when the reader is there or a message was added: a loop's status,
+    // redrawn every few seconds, pulled a reader who had scrolled up to an earlier answer back down
+    const follow = el.scrollTop + el.clientHeight > el.scrollHeight - 60 || el._nMsgs !== S.msgs.length || S.busy;
+    const top = el.scrollTop;
+    el._nMsgs = S.msgs.length;
     const msgs = S.msgs.map((m, i) => {
       if (m.role === "user") return `<div class="ai-msg ai-user"><div class="ai-bubble">${esc(m.text)}</div></div>`;
       if (m.error) return `<div class="ai-msg"><div class="ai-card bad">${esc(m.error)}</div></div>`;
@@ -212,7 +217,7 @@
     const edit = el.querySelector("[data-aiedit]"); if (edit) edit.onclick = () => openInTabs(S.msgs[S.msgs.length - 1].reply);
     el.querySelectorAll("[data-aiview]").forEach((b) => b.onclick = () => { H().attach(b.dataset.aiview); H().setCenter("res"); });
     const go = el.querySelectorAll("[data-aigo]"); go.forEach((b) => b.onclick = () => { const [t, c] = b.dataset.aigo.split(","); if (t) H().setTab(t); if (c) H().setCenter(c); });
-    const w = el.querySelector(".ai-wrap"); if (w) el.scrollTop = el.scrollHeight;
+    const w = el.querySelector(".ai-wrap"); if (w) el.scrollTop = follow ? el.scrollHeight : top;
   }
 
   function card(r, live, done) {

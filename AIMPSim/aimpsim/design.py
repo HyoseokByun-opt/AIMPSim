@@ -607,6 +607,12 @@ def recommend(study, rows, spec, seed=0, n_combo=1500, ctx_out=None):
             short.append(xs[ci] - float(real))
             held.append((xs[ci], float(real)))
             xs[ci] = float(real)
+        # the other factors the run reports as realised (MPSim 5.6.7: the share of the filler, a particle size):
+        # the value the structure holds, as for the content
+        for i, p in enumerate(paths):
+            rv = met_.get("real_" + p)
+            if i != ci and rv is not None and np.isfinite(float(rv)) and float(rv) > 0:
+                xs[i] = float(rv)
         X.append(xs)
         Y.append([float(v) for v in vs])
         used.append(r)

@@ -14,8 +14,8 @@ shows it as the AI tab (between Home and Material).
 """
 from __future__ import annotations
 
-__version__ = "0.3.2"
-MPSIM_MIN = "5.6.6"
+__version__ = "0.3.3"
+MPSIM_MIN = "5.6.7"
 
 
 def register(app, host):
