@@ -866,6 +866,36 @@ def test_via(lex, host):
     return errs
 
 
+def test_via_stress(lex, host):
+    """A glass-core TGV with its thermal stress (MPSim 5.8.0): the glass is the substrate (not a filler), "열응력" is the
+    via's stress (not a film's warpage), the options reach MPSim and it accepts them."""
+    errs = []
+    planner = Planner(lex, host)
+    for text in ("유리 기판 1.8T에 홀 100um, 피치 300um, Cu 도금 10um인 관통 via를 에폭시 바인더에 구형 Cu 6.38um 40vol% 페이스트로 채웠을 때 "
+                 "저항, 임피던스와 열응력을 계산해줘",
+                 "A through-glass via in a 1.8 mm glass core: 100 um hole, 300 um pitch, 10 um Cu plating, filled with a paste of "
+                 "spherical Cu 6.38 um at 40 vol% in epoxy. Compute the resistance, the impedance and the thermal stress in the glass"):
+        it = parse(text, lex)
+        r = planner.resolve(it, {"_auto": True})
+        p = r["payload"] or {}
+        f = p.get("form") or {}
+        v = (f.get("options") or {}).get("via") or {}
+        st = v.get("stress") or {}
+        an = f.get("analyses") or {}
+        mats = [ph.get("material_id") for ph in f.get("phases") or []] + [(f.get("matrix") or {}).get("material_id")]
+        if not st.get("on") or st.get("core") != "rve" or v.get("eps_r") != 4.8 or v.get("tan_d") != 0.007:
+            errs.append(f"{text[:20]}: via {v}")
+        if an.get("thermomech") or not an.get("via"):
+            errs.append(f"{text[:20]}: analyses {an}")
+        if any(m and ("glass" in m) for m in mats) or mats[:1] != ["cu"]:
+            errs.append(f"{text[:20]}: materials {mats}")
+        if v.get("plating_um") != 10.0 or v.get("hole_d_um") != 100.0 or v.get("length_mm") != 1.8:
+            errs.append(f"{text[:20]}: geometry {v}")
+        if r["problems"] or (host.get("validate") and host["validate"](f)):
+            errs.append(f"{text[:20]}: refused {r['problems']} {host.get('validate') and host['validate'](f)}")
+    return errs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="")
@@ -930,7 +960,7 @@ def main():
         conv_errs = test_conversation(host)
         for e in conv_errs:
             print("CONV  " + e)
-        des_errs = test_design(lex, host, read) + test_matprops(lex, host) + test_calibration_ai(lex, host) + test_loops(lex, host)             + test_via(lex, host)
+        des_errs = test_design(lex, host, read) + test_matprops(lex, host) + test_calibration_ai(lex, host) + test_loops(lex, host)             + test_via(lex, host) + test_via_stress(lex, host)
         for e in des_errs:
             print("DESIGN " + e)
     print(f"\n{n - bad}/{n} requests read as expected"

@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.4-8250df" alt="version 0.3.4">
+  <img src="https://img.shields.io/badge/version-0.3.5-8250df" alt="version 0.3.5">
   <a href="https://github.com/HyoseokByun-opt/MPSim"><img src="https://img.shields.io/badge/MPSim-5.6.6-0b62c4" alt="MPSim 5.6.6 inside"></a>
   <img src="https://img.shields.io/badge/local%20model-Qwen3.5--2B%20%C2%B7%20offline-6e40c9" alt="local model Qwen3.5-2B, offline">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-555555" alt="Windows 10 | 11 x64">
@@ -334,6 +334,17 @@ preposition: it counts only with a via word beside it (hole, plating, pitch, boa
   "도금은 20um 하나로" ends the study of the wall, "도금 10~30um" replaces it.
 - **Stated up front** in the summary's "Via model" row: the via body only, as a quasi-TEM line - no pads, antipads,
   planes or transitions to traces (a 3D full-wave problem).
+- **A glass core** ("유리 기판", "glass core", "TGV", "through-glass via") is the substrate, never a filler: εr 4.8 and
+  tan δ 0.007 (J. Liu et al., *Micromachines* **14**, 803 (2023), [doi:10.3390/mi14040803](https://doi.org/10.3390/mi14040803))
+  in place of the laminate's (0.3.5).
+- **The thermal stress** ("열응력", "응력", "균열", "thermal stress", "crack") of a via request is the via's stress in its
+  substrate (MPSim 5.8.0), not the warpage of a film: cooling from the cure at 150 °C to 25 °C, a glass of E 73 GPa,
+  ν 0.22 and α 3.8 ppm/K (M. Zhai et al., CLEO/Europe-EQEC 2023,
+  [doi:10.1109/CLEO/Europe-EQEC57999.2023.10231702](https://doi.org/10.1109/CLEO/Europe-EQEC57999.2023.10231702)),
+  copper of E 123.5 GPa, ν 0.350 (H. M. Ledbetter, E. R. Naimon, *J. Phys. Chem. Ref. Data* **3**, 897 (1974),
+  [doi:10.1063/1.3253150](https://doi.org/10.1063/1.3253150)) and α 17.0 ppm/K (NIST SRM 736), the core the paste - its E,
+  ν and α from the elasticity and CTE analysis MPSim adds; the conformal and fully plated vias compared at every wall
+  (0.3.5).
 
 Run end to end in a browser (MPSim 5.7.0, the bundled model, a laptop with 18 threads and 16 GB; no browser errors),
 the example below went from Run to the summary in 34 minutes without a further click: the calibration (10 minutes,
@@ -465,11 +476,11 @@ answer says so instead of suggesting a higher content.
 
 ## Installation
 
-**PC without internet.** Download `AIMPSim-0.3.4-offline-win64.zip` from the
+**PC without internet.** Download `AIMPSim-0.3.5-offline-win64.zip` from the
 [latest release](https://github.com/HyoseokByun-opt/AIMPSim/releases/latest): MPSim with the AI tab, the model and its
 server, the Python runtime, every wheel and openEMS. Unzip to a short path such as `C:\AIMPSim`, run
 `1_INSTALL_OFFLINE.bat`, then `2_RUN_LOCAL.bat`. For the larger model, unzip
-`AIMPSim-0.3.4-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
+`AIMPSim-0.3.5-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
 
 **PC with internet and conda.**
 

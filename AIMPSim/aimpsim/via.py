@@ -19,7 +19,12 @@ filler's size or a content. What is read:
 - the return vias: GSG, one return via (S-G), 4 or 8 around;
 - the frequency the results are read at: "10GHz";
 - a paste ("paste", "페이스트"): the particles of the fill may overlap (the
-  necks a cure forms).
+  necks a cure forms);
+- a glass core ("유리 기판", "glass core", "TGV"): the substrate is glass - its
+  εr and tan δ, and for the stress its stiffness and expansion; the words are
+  the substrate's, not a filler (5.8.0);
+- the thermal stress ("열응력", "응력", "균열", "crack", "thermal stress"): the
+  via's stress in its substrate (MPSim 5.8.0), not the warpage of a film.
 
 Words of the wall's metal ("Cu 도금", "copper plating") are not a filler,
 nor is "AR" (argon by its formula): their spans are returned so that the
@@ -29,16 +34,20 @@ from __future__ import annotations
 
 import re
 
-WORD = re.compile(r"비아|관통\s*홀|스루\s*홀|도금\s*홀|홀\s*(?:충전|필링|채움|플러깅)|하이브리드\s*(?:필링|충전)"
-                  r"|(?<![a-z])(?:through[\s-]*(?:holes?|vias?)|pths?|plated[\s-]*through[\s-]*holes?"
+WORD = re.compile(r"비아|관통\s*홀|관통\s*vias?|스루\s*홀|도금\s*홀|홀\s*(?:충전|필링|채움|플러깅)|하이브리드\s*(?:필링|충전)"
+                  r"|(?<![a-z])(?:through[\s-]*(?:glass[\s-]*)?(?:holes?|vias?)|pths?|tgvs?|plated[\s-]*through[\s-]*holes?"
                   r"|hybrid[\s-]*fill(?:ing|ed)?)(?![a-z])", re.IGNORECASE)
 EN_VIA = re.compile(r"(?<![a-z])vias?(?![a-z])", re.IGNORECASE)
 # English "via" is a via only with one of these beside it in the sentence
-EN_CONTEXT = re.compile(r"hole|plat(?:ing|ed)|pitch|board|pcb|impedance|s-?parameter|paste|laminate|drill|barrel",
-                        re.IGNORECASE)
+EN_CONTEXT = re.compile(r"hole|plat(?:ing|ed)|pitch|board|pcb|impedance|s-?parameter|paste|laminate|drill|barrel"
+                        r"|홀|도금|피치|기판|페이스트|임피던스|구멍", re.IGNORECASE)
 RESPONSE = re.compile(r"임피던스|impedance|s\s*-?\s*파라미터|s-?parameters?|\bs21\b|\bs11\b|삽입\s*손실|반사\s*손실"
                       r"|insertion\s+loss|return\s+loss", re.IGNORECASE)
 PASTE = re.compile(r"페이스트|(?<![a-z])pastes?(?![a-z])|소결|sinter", re.IGNORECASE)
+# a glass core: the substrate, never a filler
+GLASS = re.compile(r"(?:유리|글라스|glass)\s*(?:기판|코어|core|substrate|interposer|인터포저|웨이퍼|wafer|패널|panel)?"
+                   r"|(?<![a-z])tgvs?(?![a-z])|through[\s-]*glass[\s-]*vias?", re.IGNORECASE)
+STRESS = re.compile(r"열\s*응력|응력|균열|크랙|깨짐|파손|(?:thermal\s*)?stress(?:es)?|cracks?|cracking", re.IGNORECASE)
 # the wall's metal, never a filler of the composite
 WALL_METAL = re.compile(r"(?:cu|copper|구리|동)\s*(?:전해\s*)?(?:도금|plating|plated|wall)"
                         r"|(?:electro)?plated\s+(?:cu|copper)", re.IGNORECASE)
@@ -57,7 +66,8 @@ B = {
 }
 A = {
     "hole_d_um": re.compile(r"^\s*(?:의\s*)?(?:짜리\s*)?(?:홀|구멍|hole|drill|드릴|via\s*hole|비아\s*홀)", re.IGNORECASE),
-    "length_mm": re.compile(r"^\s*(?:두께의?\s*|thick\s*)?(?:기판|보드|board|pcb|substrate|적층판|laminate|패널|panel)",
+    "length_mm": re.compile(r"^\s*(?:두께의?\s*|thick\s*)?(?:(?:유리|글라스|glass)\s*)?(?:기판|보드|board|pcb|substrate|적층판|laminate|패널|panel"
+                            r"|코어|core|웨이퍼|wafer)",
                             re.IGNORECASE),
     "pitch_um": re.compile(r"^\s*(?:의\s*)?(?:피치|pitch)", re.IGNORECASE),
     "plating_um": re.compile(r"^\s*(?:두께의?\s*|thick\s*)?(?:(?:cu|copper|구리|동)\s*)?(?:도금|plating|wall)", re.IGNORECASE),
@@ -92,9 +102,13 @@ def read(t, qs, open_=False):
     low = t.lower()
     out = {"options": {}, "factors": [], "used": set(), "said": {}, "paste": bool(PASTE.search(t)),
            "wall_spans": [(m.start(), m.end()) for m in WALL_METAL.finditer(t)], "ar": None,
-           "responses": bool(RESPONSE.search(t))}
+           "responses": bool(RESPONSE.search(t)), "glass": False, "stress": bool(STRESS.search(t))}
+    for m in GLASS.finditer(t):
+        out["glass"] = True
+        out["wall_spans"].append((m.start(), m.end()))         # the substrate, not a filler
     # the board as "1.8T" (a thickness in mm, as boards are named)
-    for m in re.finditer(r"(?<![\w.])(\d+(?:\.\d+)?)\s*t(?![a-z가-힣])", low):
+    # ("1.8T" alone or with a Korean particle: "1.8T에", "1.8T의"; not "1.8 톤")
+    for m in re.finditer(r"(?<![\w.])(\d+(?:\.\d+)?)\s*t(?![a-z])(?!(?![에의는은이가를을로와과])[가-힣])", low):
         v = float(m.group(1))
         if 0.05 <= v <= 20:
             out["options"]["length_mm"] = v

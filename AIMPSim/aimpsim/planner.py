@@ -728,6 +728,24 @@ class Planner:
             # al., Trans. IMF 68 (1990) 50, doi:10.1080/00202967.1990.11870866)
             o["throw"] = 0.8 if ar >= 15 else 1.0
             o["_throw_src"] = "fisher" if ar >= 15 else "uniform"
+        if vr.get("glass"):
+            # a glass core: eps_r 4.8, tan d 0.007 at 30 GHz as used for through-glass vias (J. Liu et al., Micromachines
+            # 14 (2023) 803, doi:10.3390/mi14040803)
+            o["eps_r"], o["tan_d"] = 4.8, 0.007
+            notes.append(L("유리 기판: εr 4.8, tan δ 0.007", "glass core: εr 4.8, tan δ 0.007"))
+        if vr.get("stress"):
+            # the via's thermal stress (MPSim 5.8.0): cooling from the cure of the fill (150 C) to 25 C; a glass core of
+            # E 73 GPa, nu 0.22 (assumed) and alpha 3.8 ppm/K (alkali-free boroaluminosilicate: M. Zhai et al., CLEO/Europe
+            # 2023, doi:10.1109/CLEO/Europe-EQEC57999.2023.10231702); copper E 123.5 GPa, nu 0.350 (H. M. Ledbetter,
+            # E. R. Naimon, J. Phys. Chem. Ref. Data 3 (1974) 897, doi:10.1063/1.3253150), alpha 17.0 ppm/K (NIST SRM 736:
+            # T. A. Hahn, J. Appl. Phys. 41 (1970) 5096, doi:10.1063/1.1658614); the core this composite (its E, nu, alpha
+            # from the elasticity and CTE analysis MPSim adds)
+            o["stress"] = {"on": True, "T_free": 150.0, "T_use": 25.0, "sub_E": 73.0, "sub_nu": 0.22, "sub_alpha": 3.8,
+                           "wall_E": 123.5, "wall_nu": 0.35, "wall_alpha": 17.0, "core": "rve", "R_factor": 10.0,
+                           "compare": True, "mesh": "standard"}
+            notes.append(L("열응력: 150 °C(경화) → 25 °C 냉각, 유리 E 73 GPa·α 3.8 ppm/K, Cu E 123.5 GPa·α 17 ppm/K, 코어는 이 paste",
+                           "thermal stress: cooling 150 °C (cure) → 25 °C, glass E 73 GPa · α 3.8 ppm/K, Cu E 123.5 GPa · "
+                           "α 17 ppm/K, the core this paste"))
         if o.get("hole_d_um") and o.get("plating_um") and 2 * o["plating_um"] >= o["hole_d_um"]:
             notes.append(L(f"도금 {o['plating_um']:g} µm가 홀 {o['hole_d_um']:g} µm를 다 채웁니다 (속이 빈 채움 없음)",
                            f"a plating of {o['plating_um']:g} µm closes the {o['hole_d_um']:g} µm hole (no fill left)"))

@@ -221,6 +221,9 @@ def parse(text, lex, via_open=False):
                 pen += 15                  # "55 vol%의 알루미나": the number is the next material's
             if not after and not has_hangul(t):
                 pen -= 3                   # English reads "30 vol% silica"
+            if not after and re.fullmatch(r"\s*(?:in|into|within|inside)\s+(?:(?:an?|the)\s+)?(?:[a-z-]+\s+)?", between,
+                                          re.IGNORECASE):
+                pen += 15                  # "Cu at 40 vol% in epoxy": the loading in the receiving matrix
             if any(o is not s and any(lo <= x < hi for x, _ in o["spans"]) for o in slots):
                 pen += 40
             if _JOIN.search(between):
@@ -539,6 +542,9 @@ def parse(text, lex, via_open=False):
             if k not in intent["analyses"]:
                 intent["analyses"].append(k)
         intent["analysis_choices"] = [c for c in intent["analysis_choices"] if "electrical" not in c["keys"]]
+        if vr.get("stress"):
+            # "열응력" of a via is the via's stress in its substrate (MPSim 5.8.0), not the warpage of a film
+            intent["analyses"] = [a for a in intent["analyses"] if a != "thermomech"]
 
     # ---- measurements (calibration) and targets (optimisation) ------------------------
     prop_words = {"k": "thermal", "sigma": "electrical", "eps_r": "dielectric", "alpha": "cte", "E": "cte", "mu": "viscosity"}
