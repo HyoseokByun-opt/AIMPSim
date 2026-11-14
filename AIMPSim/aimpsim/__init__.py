@@ -14,7 +14,7 @@ shows it as the AI tab (between Home and Material).
 """
 from __future__ import annotations
 
-__version__ = "0.3.5"
+__version__ = "0.3.6"
 MPSIM_MIN = "5.7.0"
 
 
