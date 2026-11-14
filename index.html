@@ -27,7 +27,7 @@
   "description": "MPSim with an AI tab: simulation requests in words, read by a local language model and checked against the sentence.",
   "applicationCategory": "ScientificApplication",
   "operatingSystem": "Windows 10, Windows 11",
-  "softwareVersion": "0.3.5",
+  "softwareVersion": "0.3.6",
   "license": "https://opensource.org/licenses/MIT",
   "url": "https://hyoseokbyun-opt.github.io/AIMPSim/",
   "downloadUrl": "https://github.com/HyoseokByun-opt/AIMPSim/releases/latest",
@@ -190,8 +190,8 @@
       <a class="btn" href="https://github.com/HyoseokByun-opt/AIMPSim/blob/main/AIMPSim/docs/GUIDE_KO.md">Guide (Korean)</a>
       <a class="btn" href="https://github.com/HyoseokByun-opt/AIMPSim">Source code</a>
     </div>
-    <div class="meta"><b>Version 0.3.5</b> · MIT License · Windows 10 / 11 · works offline ·
-      MPSim 5.8.0 inside</div>
+    <div class="meta"><b>Version 0.3.6</b> · MIT License · Windows 10 / 11 · works offline ·
+      MPSim 5.9.0 inside</div>
     <figure class="banner shotframe">
       <img src="assets/ai_tab.png" width="1500" height="950" fetchpriority="high"
            alt="The AI tab of MPSim: a casual request with a correction, read into a summary of what will run, with the questions and their recommended answers">
@@ -292,7 +292,9 @@
             particles may overlap, on one grid for the calibration and the study</li>
           <li><span lang="ko">"유리 기판 TGV ... 열응력"</span>, "through-glass via ... thermal stress in the glass": the glass is the
             substrate (ε<sub>r</sub> 4.8, tan δ 0.007), never a filler; the stress is the via's in its substrate (MPSim 5.8.0), not a
-            film's warpage</li></ul></div>
+            film's warpage</li>
+          <li>MPSim 5.9.0 inside: the conduction-type properties also by finite elements on a tetrahedral mesh fitted to the particles,
+            and a particle generator audited at 40-70 vol% for every shape - a structure that misses its loading is no longer solved</li></ul></div>
         <div class="card"><span class="tag ai">Material values</span><h3>For one request</h3>
           <ul><li><span lang="ko">"알루미나 열전도도 20으로", "라이브러리보다 10 낮게", "30% 높게", "절반으로"</span></li>
           <li>The value goes into this case's phase and name; the material library is not changed, and the next request
@@ -406,7 +408,7 @@
       <h2>Download and install</h2>
       <div class="two">
         <div class="card"><h3>PC without internet</h3>
-          <p>Download <code>AIMPSim-0.3.5-offline-win64.zip</code> from the
+          <p>Download <code>AIMPSim-0.3.6-offline-win64.zip</code> from the
           <a href="https://github.com/HyoseokByun-opt/AIMPSim/releases/latest">latest release</a>: MPSim with the AI tab, the
           model and its server, the Python runtime, every wheel and openEMS. Unzip to a short path such as
           <code>C:\AIMPSim</code>, run <code>1_INSTALL_OFFLINE.bat</code>, then <code>2_RUN_LOCAL.bat</code>.</p>
