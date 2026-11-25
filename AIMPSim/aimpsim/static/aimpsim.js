@@ -24,13 +24,11 @@
     "실리콘에 판상 질화붕소 30wt% 종횡비 10, 열전도도 3방향",
     "에폭시에 알루미나 10마이크로 구형 40~60% 범위로 5단계 DOE, 열전도도",
     "에폭시에 실리카 20%일 때 0.45 W/mK, 40%일 때 0.8 W/mK 측정됐어. 계면저항 보정해줘",
-    "에폭시 바인더에 구형 Cu 입경 6.38um를 40vol% 넣은 Cu paste의 비저항이 5E-5 Ω·cm로 측정됐어. 이 값으로 입자 접촉저항을 보정한 다음, 1.8T 기판에 홀 100um, pitch 300um로 뚫고 Cu 도금한 뒤 이 paste로 채운 관통 비아에서 Cu 함량 30, 35, 40, 45, 50, 55 vol%와 도금 두께 5, 10, 15, 20, 25um로 DOE 해서 저항과 임피던스 구해줘",
     "에폭시에 알루미나 함량을 40~60%로 바꿔가며 열전도도가 최대가 되는 조건 찾아줘",
     "10um 에폭시 필름에서 알루미나를 가장 적게 넣고 z방향 열전도도 3 W/mK가 되는 크기와 배합비율 알려줘. topcut 3um, 가장 작은 입자 200nm, 최대 62vol%, 분포는 고려하지 않음, 필러-레진·필러-필러 열저항 1E-8, 비슷하면 점도 낮고 패킹 잘되는 조합",
     "에폭시에 구형 알루미나 10um 50vol%, 알루미나 열전도도는 라이브러리보다 10 낮게 해서 열전도도",
     "epoxy with 60 vol% spherical silica 4 um, thermal conductivity and CTE, accurate",
     "silicone with 50 vol% alumina 10 um, permittivity, quick, 2 runs at a time",
-    "A Cu paste of spherical Cu 6.38 um at 40 vol% in an epoxy binder measured 5E-5 ohm cm. Calibrate the particle contact resistance, then fill a through via with it - 1.8 mm board, 100 um hole, 300 um pitch, Cu plating 5, 10, 15, 20, 25 um - and run a DOE of the Cu content 30, 35, 40, 45, 50, 55 vol% for the resistance and impedance",
   ];
 
   async function post(url, body) {
