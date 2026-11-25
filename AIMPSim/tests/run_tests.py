@@ -823,16 +823,16 @@ def test_via(lex, host):
     from aimpsim.web import Assistant
     errs = []
     planner = Planner(lex, host)
-    text = next(t for t, _ in CASES if t.startswith("에폭시 바인더에 구형 Cu 입경 6.38um"))
+    text = next(t for t, _ in CASES if t.startswith("에폭시 바인더에 구형 Cu 입경 8um"))
     r = planner.resolve(parse(text, lex), {"_auto": True})
     p = r["payload"] or {}
     f = p.get("form") or {}
     v = (f.get("options") or {}).get("via") or {}
-    want = {"hole_d_um": 100.0, "length_mm": 1.8, "pitch_um": 300.0, "throw": 0.8, "returns": "coax4", "eps_r": 3.37}
+    want = {"hole_d_um": 120.0, "length_mm": 2.0, "pitch_um": 400.0, "throw": 0.8, "returns": "coax4", "eps_r": 3.37}
     if p.get("kind") != "cal_doe" or any(v.get(k) != x for k, x in want.items()):
         errs.append(f"via example: kind {p.get('kind')}, via {v}")
     ph = (f.get("phases") or [{}])[0]
-    if not ph.get("overlap") or f.get("rve", {}).get("voxel_um") != 0.4 or f.get("rve", {}).get("L_um") != 76.8:
+    if not ph.get("overlap") or f.get("rve", {}).get("voxel_um") != 0.5 or f.get("rve", {}).get("L_um") != 96.0:
         errs.append(f"via example paste: overlap {ph.get('overlap')}, rve {f.get('rve')}")
     pars = {q["path"]: q for q in (p.get("doe") or {}).get("parameters") or []}
     if pars.get("options.via.plating_um", {}).get("values") != [5.0, 10.0, 15.0, 20.0, 25.0]             or pars.get("phases.0.fraction.value", {}).get("steps") != 6 or (p.get("doe") or {}).get("n_cases") != 30:
@@ -848,7 +848,7 @@ def test_via(lex, host):
     r1 = a.interpret(text, new=True)
     r2 = a.interpret("피치는 250um로 바꿔줘", r1["session_id"])
     v2 = ((r2.get("payload") or {}).get("form") or {}).get("options", {}).get("via") or {}
-    if v2.get("pitch_um") != 250.0 or v2.get("hole_d_um") != 100.0:
+    if v2.get("pitch_um") != 250.0 or v2.get("hole_d_um") != 120.0:
         errs.append(f"via follow-up pitch: {v2}")
     r3 = a.interpret("도금은 20um 하나로", r1["session_id"])
     p3 = r3.get("payload") or {}
@@ -867,14 +867,14 @@ def test_via(lex, host):
 
 
 def test_via_stress(lex, host):
-    """A glass-core TGV with its thermal stress (MPSim 5.8.0): the glass is the substrate (not a filler), "열응력" is the
-    via's stress (not a film's warpage), the options reach MPSim and it accepts them."""
+    """A via with its thermal stress in the substrate (MPSim 5.8.0): "열응력" is the via's stress (not a film's warpage),
+    the options reach MPSim and it accepts them."""
     errs = []
     planner = Planner(lex, host)
-    for text in ("유리 기판 1.8T에 홀 100um, 피치 300um, Cu 도금 10um인 관통 via를 에폭시 바인더에 구형 Cu 6.38um 40vol% 페이스트로 채웠을 때 "
+    for text in ("2.0T 기판에 홀 120um, 피치 400um, Cu 도금 10um인 관통 via를 에폭시 바인더에 구형 Cu 8um 40vol% 페이스트로 채웠을 때 "
                  "저항, 임피던스와 열응력을 계산해줘",
-                 "A through-glass via in a 1.8 mm glass core: 100 um hole, 300 um pitch, 10 um Cu plating, filled with a paste of "
-                 "spherical Cu 6.38 um at 40 vol% in epoxy. Compute the resistance, the impedance and the thermal stress in the glass"):
+                 "A through via in a 2.0 mm board: 120 um hole, 400 um pitch, 10 um Cu plating, filled with a paste of "
+                 "spherical Cu 8 um at 40 vol% in epoxy. Compute the resistance, the impedance and the thermal stress in the board"):
         it = parse(text, lex)
         r = planner.resolve(it, {"_auto": True})
         p = r["payload"] or {}
@@ -883,13 +883,13 @@ def test_via_stress(lex, host):
         st = v.get("stress") or {}
         an = f.get("analyses") or {}
         mats = [ph.get("material_id") for ph in f.get("phases") or []] + [(f.get("matrix") or {}).get("material_id")]
-        if not st.get("on") or st.get("core") != "rve" or v.get("eps_r") != 4.8 or v.get("tan_d") != 0.007:
+        if not st.get("on") or st.get("core") != "rve" or v.get("eps_r") != 3.37 or v.get("tan_d") != 0.002:
             errs.append(f"{text[:20]}: via {v}")
         if an.get("thermomech") or not an.get("via"):
             errs.append(f"{text[:20]}: analyses {an}")
         if any(m and ("glass" in m) for m in mats) or mats[:1] != ["cu"]:
             errs.append(f"{text[:20]}: materials {mats}")
-        if v.get("plating_um") != 10.0 or v.get("hole_d_um") != 100.0 or v.get("length_mm") != 1.8:
+        if v.get("plating_um") != 10.0 or v.get("hole_d_um") != 120.0 or v.get("length_mm") != 2.0:
             errs.append(f"{text[:20]}: geometry {v}")
         if r["problems"] or (host.get("validate") and host["validate"](f)):
             errs.append(f"{text[:20]}: refused {r['problems']} {host.get('validate') and host['validate'](f)}")

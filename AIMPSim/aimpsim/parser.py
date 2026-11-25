@@ -315,10 +315,9 @@ def parse(text, lex, via_open=False):
     # contents -> materials, one each, nearest first
     pairs = sorted(((dist(s, q["start"], q["end"]), i, j) for j, q in enumerate(contents) for i, s in enumerate(slots)),
                    key=lambda x: x[0])
-    used_q, used_s = set(), set()
-    for d, i, j in pairs:
-        if i in used_s or j in used_q or d > 60:
-            continue
+    used_q, used_s, owner = set(), set(), {}
+
+    def give(i, j):
         q, s = contents[j], slots[i]
         val, basis, how = as_content(q)
         s["content"] = {"value": val, "basis": basis, "how": how, "raw": q["raw"], "end": q["end"]}
@@ -330,6 +329,29 @@ def parse(text, lex, via_open=False):
             notes.append({"type": "unit", "text": q["raw"], "rule": how, "value": val})
         used_q.add(j)
         used_s.add(i)
+        owner[i] = j
+
+    for d, i, j in pairs:
+        if i in used_s or j in used_q or d > 60:
+            continue
+        give(i, j)
+    # a filler said with one content and also with the levels or the range of a study ("Cu 8 um at 40 vol% ... a DOE
+    # of the Cu content 30, 35, ... 55 vol%"): the study's levels are its content and the single one stays a sample's
+    # (a measurement's condition). Nearest-first alone gave the single one whenever it stood as close as the levels,
+    # and the study's factor was lost.
+    for j, q in enumerate(contents):
+        if j in used_q or not (q.get("levels") or "hi" in q):
+            continue
+        near = min(((dist(s, q["start"], q["end"]), i) for i, s in enumerate(slots)), default=None)
+        if near is None or near[0] > 60 or near[1] not in owner:
+            continue
+        i = near[1]
+        p = contents[owner[i]]
+        s = slots[i]
+        if p.get("levels") or "hi" in p or s["kind"] != "material" or (s["id"] and lex.group(s["id"]) == "polymer"):
+            continue
+        used_q.discard(owner[i])
+        give(i, j)
     # a general name said again as a specific one ("실리카 함량 ... 결정질 실리카 구형 10um"): one material, the
     # specific one, unless both carry a content of their own (two grades mixed)
     for s in list(slots):

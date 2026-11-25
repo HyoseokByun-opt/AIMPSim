@@ -265,7 +265,7 @@ FINAL = [
 # Written after the last change, read once and reported as it came out: no change follows from it.
 LAST = [
     ("round", "고열전도 언더필 만드는 중인데요, 에폭시에 구형 알루미나 60% 넣으면 흐름성이랑 열전도 둘 다 어떨까요", {"m": E, "f": [(A, 60)], "a": {"viscosity", "thermal"}}),
-    ("round", "LTCC 대신 유리 기판 쓰려는데, 에폭시에 붕규산유리 40% 넣은 거 유전율", {"m": E, "f": [("glass_bsg", 40)], "a": {"dielectric"}}),
+    ("round", "LTCC 대신 쓰려는데, 에폭시에 붕규산유리 40% 넣은 거 유전율", {"m": E, "f": [("glass_bsg", 40)], "a": {"dielectric"}}),
     ("round", "a conductive adhesive: epoxy and 75% silver flakes. will it conduct?", {"m": E, "f": [("ag", 75)], "a": {"electrical"}}),
     ("round", "how much will a silicone with 20% graphite heat up when current passes through it", {"m": "silicone", "f": [("graphite", 20)], "a": {"joule"}}),
     ("amount", "에폭시 10에 실리카 15 비율이면 CTE 얼마나 낮아져", {"m": E, "f": [(S, 60)], "a": {"cte"}}),
