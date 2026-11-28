@@ -477,6 +477,18 @@ class Planner:
                 payload["settings_src"] = psrc
             except ValueError as e:
                 problems.append(str(e))
+            if payload is not None and not problems:
+                # platelets or fibres at more than random orientation allows (calcheck.crowded): laid in the plane
+                # when the request did not say how they lie, a caution when it said "random"
+                for fm in [payload["form"]] + list(payload.get("more_forms") or []):
+                    cr = CC.crowded(self._filled(fm), payload.get("cal"), payload.get("doe"))
+                    if not cr:
+                        continue
+                    if not it.get("orientation"):
+                        CC.lay_in_plane(fm, cr)
+                        if not it.get("directions") and not payload.get("cal"):
+                            fm.setdefault("options", {})["directions"] = "zxy"
+                    notes.append(CC.crowded_note(cr, lang, laid=not it.get("orientation")))
             if payload is not None and self.host.get("validate") and not problems:
                 for fm in [payload["form"]] + list(payload.get("more_forms") or []):
                     err = self.host["validate"](fm)
@@ -495,6 +507,35 @@ class Planner:
             if payload is not None and self.host.get("plan") and not problems:
                 try:
                     pl = self.host["plan"](payload["form"])
+                    # Accurate chosen here (not asked for) that this PC cannot hold: Standard, said with the numbers.
+                    # Dense high-contrast fillers at Accurate were an FV problem of a few GB; on the tetrahedral FEM
+                    # (the thermal conductivity since MPSim 5.12.0) 55 vol% alumina 10 µm needed about 17 GB on 168³
+                    mchk = next((c for c in pl.get("checks") or [] if c.get("id") == "memory"), {})
+                    rv = (payload.get("form") or {}).get("rve") or {}
+                    if (qsrc in ("auto", "default") and quality == "accurate" and rv.get("quality") == "accurate"
+                            and mchk.get("status") in ("warn", "fail") and not payload.get("runs")):
+                        rv["quality"] = "standard"
+                        pl2 = self.host["plan"](payload["form"])
+                        m1, m2 = float(mchk.get("value") or 0.0), max((pl2.get("memory_gb") or {"": 0.0}).values())
+                        # the open question recommends what runs: Standard, Accurate still a choice
+                        for q in Q:
+                            if q.get("id") == "quality":
+                                q["default"] = "standard"
+                                for o in q.get("options") or []:
+                                    o["recommended"] = o.get("value") == "standard"
+                                    base = name(QUALITY_NAME, o.get("value"), lang)
+                                    o["label"] = base + (_lab(lang, " ← 추천", " ← recommended") if o["recommended"] else
+                                                         _lab(lang, f" (약 {m1:.0f} GB)", f" (about {m1:.0f} GB)")
+                                                         if o.get("value") == "accurate" else "")
+                        qrow = next((r for r in summary if r.get("key") == "quality"), None)
+                        if qrow is not None:
+                            qrow["v"] = name(QUALITY_NAME, "standard", lang) + "*"
+                            qrow["src"] = ((qrow.get("src") or "") + " · " if qrow.get("src") else "") + _lab(
+                                lang, f"정확(Accurate)은 이 PC에 약 {m1:.0f} GB가 필요해 표준으로 실행(약 {m2:.0f} GB). "
+                                      f"정확을 원하면 '정확하게'라고 요청",
+                                f"Accurate would need about {m1:.0f} GB on this PC: Standard (about {m2:.0f} GB). "
+                                f"Ask for 'accurate' to run it anyway")
+                        pl = pl2
                     at = next((k for k, r in enumerate(summary) if r.get("key") == "quality"), len(summary) - 1)
                     summary.insert(at + 1, self._plan_row(pl, lang))
                     payload["plan"] = {k: pl.get(k) for k in ("N", "h_um", "L_um", "memory_gb", "film", "Nz")}
@@ -689,7 +730,8 @@ class Planner:
             dist = {"type": "lognormal", "std": float(std)}
         ph = {"material_id": f["id"], "name": self.mname(f["id"]), "shape": ms, "size": size, "dist": dist,
               "fraction": {"value": round(float(f["content"]["value"]), 4), "basis": f["content"].get("basis") or "vol"},
-              "orientation": {"mode": f.get("orientation") or "iso", "spread_deg": 0}}
+              "orientation": {"mode": CC.axis_mode(f.get("orientation") or "iso", {"shape": ms, "size": size}),
+                              "spread_deg": 0}}
         if f.get("props"):
             # this request's values in this case only: the library entry is not changed
             ph["props"] = dict(self.props(f["id"]), **f["props"])
@@ -785,7 +827,7 @@ class Planner:
         orient = it.get("orientation")
         for p, f in zip(phases, fl):
             if orient and f["shape"] in ("platelet", "fiber", "spheroid"):
-                p["orientation"]["mode"] = orient
+                p["orientation"]["mode"] = CC.axis_mode(orient, p)
         dirs = it.get("directions")
         if not dirs:
             dirs = "xyz" if any(p["orientation"]["mode"] != "iso" for p in phases) else "z"
@@ -884,8 +926,12 @@ class Planner:
                 for u in paths:
                     if u.get("key") == "r_int":
                         u["links"] = []
+            # what the request said itself: a question at the end of the loop does not offer it back
+            said = {"basis": all((f.get("content") or {}).get("basis_src") not in ("auto", "default") for f in fl),
+                    "aspect": [bool(f.get("aspect") or f.get("thickness_um") or f.get("length_um")) for f in fl],
+                    "orientation": bool(it.get("orientation"))}
             out["cal"] = {"name": form["name"] + " · calibration", "measurements": ms, "unknowns": paths,
-                          "asked": list(cal["unknowns"])}
+                          "asked": list(cal["unknowns"]), "said": said}
             for m in cal["measurements"]:
                 if m.get("analysis") and m["analysis"] not in form["analyses"]:
                     form["analyses"][m["analysis"]] = True
@@ -909,7 +955,9 @@ class Planner:
     def _cal_precheck(self, payload, ans, lang, ask, opt, summary):
         """The measurements against the model before the run: when what was asked
         cannot reach them, the set of unknowns that can is recommended (and
-        pre-selected) with the reason; the user may keep the request's own."""
+        pre-selected) with the reason; the user may keep the request's own.
+        Conductivity: the Wiener bounds and the effective-medium preview; CTE, permittivity, modulus: a closed form
+        (calcheck.QUICK_MODEL), which also sets the range the run starts on."""
         L = lambda ko, en: _lab(lang, ko, en)                                     # noqa: E731
         cal = payload["cal"]
         asked = [u.get("key") or u["path"] for u in cal["unknowns"]]
@@ -922,38 +970,64 @@ class Planner:
         foot = [r for r in summary if r.get("k") == "*"]
         summary[:] = [r for r in summary if r.get("k") != "*"]
         names = {"r_int": L("계면저항 R_int", "R_int"), "r_contact": L("접촉저항 R_c", "R_c"),
-                 "filler_k": L("필러 열전도도", "filler k"), "matrix_k": L("매트릭스 열전도도", "matrix k")}
+                 "filler_k": L("필러 열전도도", "filler k"), "matrix_k": L("매트릭스 열전도도", "matrix k"),
+                 "filler_alpha": L("필러 CTE", "filler CTE"), "matrix_alpha": L("매트릭스 CTE", "matrix CTE"),
+                 "filler_eps_r": L("필러 유전율", "filler permittivity"), "matrix_eps_r": L("매트릭스 유전율", "matrix permittivity"),
+                 "filler_E": L("필러 탄성률", "filler modulus"), "matrix_E": L("매트릭스 탄성률", "matrix modulus")}
         lab = lambda keys: " + ".join(names.get(k, k) for k in keys)                    # noqa: E731
         plans = chk["plans"]
         rec = plans[chk["choice"]]
         pick = ans.get("cal_plan")
         chosen = next((p for p in plans if "+".join(p["keys"]) == pick), None) if pick else rec
-        unit = "W/m·K"
+        emt = chk.get("model") == "emt"
+        mname = L("유효매질 추정", "the effective-medium estimate") if emt else L(f"{chk['model']} 식", f"the {chk['model']} closed form")
         rows = []
-        for r in chk["rows"]:
-            rows.append(f"{r['label']}: {L('측정', 'measured')} {r['value']:g} · "
-                        + L(f"병렬 상한 {r['parallel']:.3g}, 직렬 하한 {r['series']:.3g} {unit}",
-                            f"parallel bound {r['parallel']:.3g}, series bound {r['series']:.3g} {unit}"))
+        if emt:
+            unit = "W/m·K"
+            for r in chk["rows"]:
+                rows.append(f"{r['label']}: {L('측정', 'measured')} {r['value']:g} · "
+                            + L(f"병렬 상한 {r['parallel']:.3g}, 직렬 하한 {r['series']:.3g} {unit}",
+                                f"parallel bound {r['parallel']:.3g}, series bound {r['series']:.3g} {unit}"))
+        else:
+            for r in chk["rows"]:
+                rows.append(f"{r['label']}: {L('측정', 'measured')} {r['value']:g} · "
+                            + L(f"라이브러리 값으로 {chk['model']} 식 {r['model']:.3g}", f"{chk['model']} with the library values {r['model']:.3g}"))
         txt = "; ".join(rows)
         if chk["above"]:
             txt += L(f" - {', '.join(chk['above'])}의 측정값은 라이브러리 값(매트릭스 {chk['rows'][0]['km']:g}, 필러 "
-                     f"{chk['rows'][0]['kf'][0]:g} {unit})으로는 어떤 미세구조로도 낼 수 없는 값(병렬 상한 초과)",
+                     f"{chk['rows'][0]['kf'][0]:g} W/m·K)으로는 어떤 미세구조로도 낼 수 없는 값(병렬 상한 초과)",
                      f" - {', '.join(chk['above'])} lies above what any microstructure gives with the library values "
-                     f"(matrix {chk['rows'][0]['km']:g}, filler {chk['rows'][0]['kf'][0]:g} {unit})")
+                     f"(matrix {chk['rows'][0]['km']:g}, filler {chk['rows'][0]['kf'][0]:g} W/m·K)")
         summary.append({"k": L("사전 점검", "Precheck"), "v": txt})
         a = plans[0]
         if a.get("miss") is not None:
+            if a.get("underdetermined"):
+                why = L(f" - 측정 {CC._n_meas(cal)}개로는 미지수 {len(a['keys'])}개를 정할 수 없음(값이 하나로 정해지지 않음)",
+                        f" - {CC._n_meas(cal)} measurement(s) cannot fix {len(a['keys'])} unknowns (no single value)")
+            elif chk["asked_ok"]:
+                why = L(" - 도달 가능", " - reachable")
+            elif chk.get("asked_close"):
+                why = L(" - 맞닿은 입자의 RVE는 평균장 모델과 보통 15~30% 다르므로 이 차이는 모델 오차 안: 요청대로 RVE로 보정합니다",
+                        " - within the usual 15-30 % between a mean field and an RVE of touching particles: calibrated as "
+                        "asked on the RVE")
+            elif a.get("plausible") is False:
+                why = L(" - 닿으려면 재료값이 라이브러리 값과 너무 멀어짐", " - only with material values far from the library's")
+            elif a.get("short") and chk.get("fem") and a["miss"] <= CC.TRY_ANYWAY:
+                why = L(" - 모델이 측정보다 낮음: 입자 사이 수지막을 푸는 FEM의 RVE는 평균장보다 낮게 나오므로 이것만으로는 도달 불가",
+                        " - the model falls short of the data, and the RVE on the FEM, with the resin films between "
+                        "touching particles, gives less than a mean field: it cannot reach them alone")
+            else:
+                why = L(" - 이것만으로는 도달 불가", " - cannot reach them alone")
             summary.append({"k": L("요청대로", "As asked"),
-                            "v": L(f"{lab(a['keys'])}: 유효매질 추정이 측정을 최대 {100 * a['miss']:.0f}% 벗어남",
-                                   f"{lab(a['keys'])}: the effective-medium estimate misses the data by up to {100 * a['miss']:.0f} %")
-                            + (L(" - 도달 가능", " - reachable") if chk["asked_ok"] else L(" - 이것만으로는 도달 불가", " - cannot reach them alone"))})
-        if not chk["asked_ok"] and chk["reachable"]:
+                            "v": L(f"{lab(a['keys'])}: {mname}이 측정을 최대 {100 * a['miss']:.0f}% 벗어남",
+                                   f"{lab(a['keys'])}: {mname} misses the data by up to {100 * a['miss']:.0f} %") + why})
+        if not chk["asked_ok"] and not chk.get("asked_close") and chk["reachable"]:
             est = ", ".join(f"{names.get(u.get('key'), u['label'])} ≈ {v:.3g}"
                             for u, v in zip(rec["unknowns"], (rec.get("estimate") or {}).values()))
             summary.append({"k": L("AI 추천", "AI recommends"),
-                            "v": L(f"{lab(rec['keys'])} 보정 (유효매질 추정 {est}, 측정과 {100 * rec['miss']:.1f}% 이내). "
+                            "v": L(f"{lab(rec['keys'])} 보정 ({mname} {est}, 측정과 {100 * rec['miss']:.1f}% 이내). "
                                    f"측정값이 이 조합을 가리키거나, 재료 등급(예: 결정질 실리카)·함량 기준이 입력과 다를 수 있음",
-                                   f"calibrate {lab(rec['keys'])} (effective-medium estimate {est}, within "
+                                   f"calibrate {lab(rec['keys'])} ({mname}: {est}, within "
                                    f"{100 * rec['miss']:.1f} % of the data); or the material grade (crystalline silica, "
                                    f"say) or the content basis differs from the input")})
             ask("cal_plan", L("측정값에 맞출 보정 대상을 고르세요.", "Which unknowns should the calibration fit?"),
@@ -962,13 +1036,26 @@ class Planner:
                    for i, p in enumerate(plans) if p is not rec and p.get("miss") is not None],
                 essential=False, default="+".join(rec["keys"]), free=False)
         elif not chk["reachable"]:
-            summary.append({"k": L("AI 판단", "AI reading"),
-                            "v": L("어떤 보정 대상 조합도 유효매질 추정으로 측정을 재현하지 못함: 측정값, 함량 기준(vol/wt), 재료를 확인하세요. "
-                                   "요청대로 실행하고, 끝난 뒤 결과를 보고 범위를 다시 잡습니다.",
-                                   "no set of unknowns reproduces the data on the effective-medium model: check the values, the "
-                                   "content basis (vol/wt) and the materials. It runs as asked, and the ranges are revisited "
-                                   "from the result.")})
-        if chosen is not None and chosen is not a:
+            phs = (payload["form"].get("phases") or [])
+            rough = any(CC._shape_of(p)[0] or ((p.get("orientation") or {}).get("mode") or "iso") != "iso" for p in phs)
+            if rough and emt and not chk["above"]:
+                # platelets, fibres or aligned particles: the mean field takes them as ellipsoids in their orientation
+                # (5.12.0), still without their contacts and stacking, so its miss decides less than for spheres
+                summary.append({"k": L("AI 판단", "AI reading"),
+                                "v": L(f"{mname}은 판상·섬유 입자를 배향을 가진 타원체로 근사할 뿐 접촉과 겹쳐 쌓임은 모르므로 이 점검으로는 판단하지 "
+                                       "않습니다. 요청대로 RVE로 보정하고, 그 결과로 모델을 보정해 다음 보정을 고릅니다.",
+                                       f"{mname} takes platelets and fibres only as ellipsoids in their orientation, without their "
+                                       "contacts and stacking, so this check does not decide: it runs as asked on the RVE, and the next "
+                                       "calibration is chosen on the model corrected by that result.")})
+            else:
+                summary.append({"k": L("AI 판단", "AI reading"),
+                                "v": L(f"어떤 보정 대상 조합도 {mname}으로는 측정을 재현하지 못함: 측정값, 함량 기준(vol/wt), 재료·형상을 확인하세요. "
+                                       "요청대로 실행하고, 끝난 뒤 RVE 결과로 모델을 보정해 다음 보정을 고릅니다.",
+                                       f"no set of unknowns reproduces the data on {mname}: check the values, the content basis "
+                                       "(vol/wt), the materials and the shape. It runs as asked, and the next calibration is chosen "
+                                       "on the model corrected by the RVE result.")})
+        if chosen is not None and (chosen is not a or not emt):
+            # the closed form also moves the run's range to hold the estimate (CTE, permittivity, modulus)
             cal["unknowns"] = copy.deepcopy(chosen["unknowns"])
         summary[:] = [r for r in summary if r.get("k") not in ("보정 대상", "Calibrated")]
         cal["plan_keys"] = "+".join((chosen or a)["keys"])
@@ -1214,7 +1301,7 @@ class Planner:
                 ph["dist"] = {"type": "mono"}
             ph["name"] = c["name"]
             if it.get("orientation") and ph["shape"] in ("spheroid", "cylinder"):
-                ph["orientation"]["mode"] = it["orientation"]
+                ph["orientation"]["mode"] = CC.axis_mode(it["orientation"], ph)
             out.append(ph)
         return out
 

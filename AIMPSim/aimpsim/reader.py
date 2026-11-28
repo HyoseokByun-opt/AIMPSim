@@ -691,6 +691,7 @@ def build_intent(js, text, lex, rule_it, all_text=None):
             s["how"] = same[0].get("how") or "exact"
         elif how0:
             s["how"] = how0             # its name read by the rules holds for every copy of it
+            s["how_copied"] = True      # ... but it is still the model's copy (fill_gaps may drop it)
         # content
         pct = h.get("percent")
         basis = h.get("basis") if h.get("basis") in ("vol", "wt", "phr") else None
@@ -1275,7 +1276,10 @@ def fill_gaps(it, rule_it, js, text, rep, lex):
         for r in back:
             rv = (r.get("content") or {}).get("value")
             for f in list(it["fillers"]):
-                if f is not r and ids.count(f.get("id")) > 1 and f.get("how") == "llm" \
+                # a material the model wrote twice where the rules read it once and another in its
+                # place ("큐브 알루미나 40vol% 1um와 탄화규소 10 vol%" read as SiC 40 + SiC 10): the copy
+                # with the restored filler's amount is that filler
+                if f is not r and ids.count(f.get("id")) > 1 and (f.get("how") == "llm" or f.get("how_copied")) \
                         and rv is not None and _close((f.get("content") or {}).get("value") or -1, [rv]):
                     it["fillers"] = [x for x in it["fillers"] if x is not f]
                     ids = [x.get("id") for x in it["fillers"]]
@@ -1294,6 +1298,9 @@ def fill_gaps(it, rule_it, js, text, rep, lex):
         if it.get("matrix") is None and (rule_it.get("matrix") or {}).get("id"):
             it["matrix"] = copy.deepcopy(rule_it["matrix"])
             rep["restored"].append(f"matrix {rule_it['matrix']['id']}")
+    _unswap(it, rule_it, text, rep)
+    for f in it["fillers"]:
+        f.pop("how_copied", None)
     if not VAGUE.search(text):
         for f in it["fillers"]:
             if f.get("content") is not None or not f.get("id"):
@@ -1303,6 +1310,40 @@ def fill_gaps(it, rule_it, js, text, rep, lex):
             if rc.get("value") is not None and rc.get("how") not in ("bare", "fraction", "derived"):
                 f["content"] = copy.deepcopy(rc)
                 rep["restored"].append(f"content {f['id']} {rc['value']:g}")
+
+
+RESPECTIVE = re.compile(r"각각|각자|순서대로|차례로|respectively|in (?:that|this) order|each", re.IGNORECASE)
+
+
+def _unswap(it, rule_it, text, rep):
+    """Contents the model gave to the wrong fillers. Where the rules read every
+    filler once, each with a percent written next to its name ("20vol%의 판상
+    질화갈륨 ... 5부피%의 구형 카본블랙"), and the model has the same fillers with
+    the same numbers in another order, the rules' pairing stands. A sentence
+    that pairs them by order ("각각", "respectively") is the model's to read."""
+    if RESPECTIVE.search(text):
+        return
+    mf = [f for f in it.get("fillers") or [] if f.get("id")]
+    rf = [f for f in rule_it.get("fillers") or [] if f.get("id")]
+    if len(mf) < 2 or len(mf) != len(rf) or len(mf) != len(it.get("fillers") or []):
+        return
+    ids = [f["id"] for f in mf]
+    if len(set(ids)) != len(ids) or set(ids) != {f["id"] for f in rf}:
+        return
+    rc = {f["id"]: f.get("content") or {} for f in rf}
+    if any(c.get("how") != "percent" or c.get("value") is None or "range" in c for c in rc.values()):
+        return
+    mc = {f["id"]: (f.get("content") or {}).get("value") for f in mf}
+    if any(v is None for v in mc.values()):
+        return
+    if sorted(mc.values()) != sorted(c["value"] for c in rc.values()):
+        return
+    if all(abs(mc[k] - rc[k]["value"]) <= 0.05 for k in mc):
+        return
+    for f in mf:
+        c = rc[f["id"]]
+        rep["differs"].append((f"content_swap:{f['id']}", mc[f["id"]], c["value"]))
+        f["content"] = dict(copy.deepcopy(c), how="llm")
 
 
 _LEN_UNIT = r"(?:um|µm|μm|micron|마이크로|미크론|nm|나노|mm|밀리)"

@@ -53,7 +53,9 @@ CTX = {
 AFTER = {
     "step": r"^\s*(?:간격|씩|단위|step|steps\b|increments?|interval)",
     "cores": r"^\s*(?:코어|cores?|threads?|스레드)",
-    "parallel": r"^\s*(?:씩\s*(?:동시|병렬)|at\s*a\s*time|in\s*parallel|동시|병렬)",
+    # "2 at a time", "2 runs at a time" (the AI tab's example), "3 cases in parallel", "2 jobs simultaneously"
+    "parallel": r"^\s*(?:씩\s*(?:동시|병렬)|(?:(?:runs?|jobs?|cases?|simulations?|calculations?)\s+)?"
+                r"(?:at\s*a\s*time|in\s*parallel|simultaneously|concurrently)|동시|병렬)",
     "levels": r"^\s*(?:단계|수준|레벨|levels?|points?|cases?|케이스)",
     # "10um 두께의 에폭시필름", "a 10 um thick film": the film's thickness, not a particle size
     "film": r"^\s*-?\s*(?:(?:두께|thick(?:ness)?)\s*(?:의|인|짜리|로|으로)?\s*(?:[^\s,.;]{0,12}\s*){0,2}?"

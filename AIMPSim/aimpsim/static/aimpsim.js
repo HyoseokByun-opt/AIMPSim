@@ -23,12 +23,12 @@
     "애폭시에 실리카 0.55만큼, 입경 5마이크로, 열전도율이랑 CTE 알아서 해줘",
     "실리콘에 판상 질화붕소 30wt% 종횡비 10, 열전도도 3방향",
     "에폭시에 알루미나 10마이크로 구형 40~60% 범위로 5단계 DOE, 열전도도",
-    "에폭시에 실리카 20%일 때 0.45 W/mK, 40%일 때 0.8 W/mK 측정됐어. 계면저항 보정해줘",
+    "에폭시에 실리카 20%일 때 0.35 W/mK, 40%일 때 0.62 W/mK 측정됐어. 계면저항 보정해줘",
     "에폭시에 알루미나 함량을 40~60%로 바꿔가며 열전도도가 최대가 되는 조건 찾아줘",
     "10um 에폭시 필름에서 알루미나를 가장 적게 넣고 z방향 열전도도 3 W/mK가 되는 크기와 배합비율 알려줘. topcut 3um, 가장 작은 입자 200nm, 최대 62vol%, 분포는 고려하지 않음, 필러-레진·필러-필러 열저항 1E-8, 비슷하면 점도 낮고 패킹 잘되는 조합",
     "에폭시에 구형 알루미나 10um 50vol%, 알루미나 열전도도는 라이브러리보다 10 낮게 해서 열전도도",
     "epoxy with 60 vol% spherical silica 4 um, thermal conductivity and CTE, accurate",
-    "silicone with 50 vol% alumina 10 um, permittivity, quick, 2 runs at a time",
+    "silicone with 40, 50 and 60 vol% alumina 10 um, permittivity, quick, 2 runs at a time",
   ];
 
   async function post(url, body) {
@@ -525,11 +525,12 @@
     tell({ role: "ai", note: `${esc(r.text || "")} <button class="btn sm" data-aigo="calibration,cal">Calibration</button>`, loop: true }, r.text);
     if (r.action === "rerun") {
       if (r.form) { lp.form = r.form; H().applyForm(r.form); }
-      const cal = Object.assign({}, lp.cal, { unknowns: r.unknowns, plan_keys: r.keys });
+      const cal = Object.assign({}, lp.cal, { unknowns: r.unknowns, plan_keys: r.keys }, r.said ? { said: r.said } : {});
       H().setCal(cal);
       const j2 = await H().runCal();
       if (!j2) { endLoop(lp); S.msgs.push({ role: "ai", error: L("다시 보정을 시작하지 못했습니다.", "The next calibration could not start.") }); return; }
-      Object.assign(lp, { job: j2, cal, round: (lp.round || 0) + 1, tried: (lp.tried || []).concat([r.keys]), wait: "cal" });
+      // an answer that changed the case (another grade, basis or shape) lets the sets tried on the old case run again
+      Object.assign(lp, { job: j2, cal, round: (lp.round || 0) + 1, tried: r.reset_tried ? [r.keys] : (lp.tried || []).concat([r.keys]), wait: "cal" });
       return;
     }
     endLoop(lp);      // done or stopped

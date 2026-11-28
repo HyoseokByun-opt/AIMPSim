@@ -6,8 +6,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.10-8250df" alt="version 0.3.10">
-  <a href="https://github.com/HyoseokByun-opt/MPSim"><img src="https://img.shields.io/badge/MPSim-5.11.0-0b62c4" alt="MPSim 5.11.0 inside"></a>
+  <img src="https://img.shields.io/badge/version-0.3.11-8250df" alt="version 0.3.11">
+  <a href="https://github.com/HyoseokByun-opt/MPSim"><img src="https://img.shields.io/badge/MPSim-5.12.0-0b62c4" alt="MPSim 5.12.0 inside"></a>
   <img src="https://img.shields.io/badge/local%20model-Qwen3.5--2B%20%C2%B7%20offline-6e40c9" alt="local model Qwen3.5-2B, offline">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-555555" alt="Windows 10 | 11 x64">
   <img src="https://img.shields.io/badge/license-MIT-2da44e" alt="MIT licence">
@@ -128,7 +128,9 @@ follow the problem:
 
 - **Accuracy level** - Accurate when the loading is dense (45 vol% or more) and the property contrast high (30 or
   more), where MPSim's own study found the result most sensitive to the arrangement; Standard otherwise (within 1 %
-  for moderate loadings); for a DOE, Standard from 10 cases and Fast from 30, so that it finishes.
+  for moderate loadings); for a DOE, Standard from 10 cases and Fast from 30, so that it finishes. Accurate chosen this
+  way that the PC's memory cannot hold (MPSim's memory check: the thermal FEM of 55 vol% alumina 10 µm needs about 21 GB
+  at Accurate) runs at Standard (about 2 GB) and the summary says so; an Accurate asked for runs as asked.
 - **Parallel runs** - one run takes every core; a study runs several cases side by side (about six cores each),
   MPSim checking the memory.
 - **Directions** - z, or x, y and z when particles are aligned.
@@ -259,35 +261,82 @@ a value to be met (1 W/m·K) ends at 0.993 W/m·K true.
 ## Calibrations the AI checks
 
 - **Before the run.** The measurements are set against the parallel and series bounds of filler and matrix with the
-  library values (Wiener bounds, which hold for any microstructure). Then each set of unknowns - what the request
-  asked for, the filler's conductivity, the matrix's, both, the filler's with R_int - is tried on MPSim's own
-  effective-medium preview (calibrate.preview, under a second each). When what was asked cannot reach the data, the
-  set that can is pre-selected with the reason, and the request's own stays a choice. Example: "에폭시에 실리카
-  20%일 때 0.45 W/mK, 40%일 때 0.8 W/mK 측정됐어. 계면저항 보정해줘" - 0.8 W/mK at 40 vol% lies above the parallel
-  bound with fused silica (0.67), so no interfacial resistance reaches it (the RVE gave 0.294 and 0.428 at the lowest
-  R_int); the filler and matrix conductivities reach it (RVE calibration: silica 6.39, epoxy 0.259 W/m·K, both
-  measurements within 0.3 %), and the reply notes that 6.39 is close to the library's crystalline silica (6.5).
-- **Until it reaches the data.** A result that does not reach the data is read. The effective-medium model is
-  corrected by what the RVE gave at the estimate, and the next calibration is chosen. There is no fixed number of
-  rounds:
-  - a range is widened (a hundredfold at the end the estimate sat on) for as long as the estimate sits at its end,
-    up to the physical limits of the quantity;
-  - every other set of unknowns is tried once;
-  - so the candidates run out.
-- **When nothing is left to change, the person is asked**, with what only they can decide: another grade of the
-  filler from the library (crystalline silica instead of fused silica, say), the other content basis (wt% instead of
-  vol%), or to stop. The answer - a click, or words such as "결정질 실리카로", "wt%로" - changes the case, which is
-  checked again and calibrated. "멈춰" stops it at once.
-- **Other properties.** Thermal conductivity is checked on the effective-medium model. For a CTE, a permittivity, a
-  modulus or an electrical conductivity the material value that property depends on is fitted: the one the request
-  names ("실리카 CTE 보정": the silica's CTE; "BN 열전도도 보정": the BN's conductivity; "에폭시 열전도도와 계면저항 둘
-  다": both), otherwise the resin's own value (CTE, permittivity, modulus) or the particles' conductivity (electrical).
-  MPSim's interface and contact resistances act on the heat flow only, so a resistance asked for with other data is
-  replaced, and the summary says why. A range the estimate sat at the end of is widened up to the physical limits,
-  then each other set of unknowns of that property is run once, then the person is asked.
-- **Measurements as people write them.** "40, 50, 60vol%에서 각각 0.9, 1.4, 2.3 W/mK", "30 vol% and 50 vol% ...: 0.62
-  and 1.35 W/mK", "0.45 and 0.92 W/mK for ... 20 and 40 vol%", "유전율: 20vol% 3.0, 40vol% 3.4": one measurement
-  each, at its own content, in order. A material value equal to a measurement ("BN k = 1.1" from "20wt%일 때 1.1
+  library values (Wiener bounds, which hold for any microstructure). Then every set of unknowns the measurements can
+  tell apart - what the request asked for, R_int, the filler's conductivity, the matrix's, the matrix's with R_int,
+  filler and matrix, the filler's with R_int - is tried on MPSim's own effective-medium preview (calibrate.preview,
+  under a second each). The request's own set runs when it reaches the data with values the materials can have, and
+  also when it comes within 30 % with plausible, determined values: before any RVE has corrected it, a mean field
+  and an RVE of touching particles differ by 15-30 %, and that error does not overrule the request (silicone +
+  alumina 40/50/60 vol% computed by the RVE at R_int 10⁻⁷ m²K/W: the model reaches it within 9 %, and R_int as asked
+  finds 1.01·10⁻⁷ in one round, 362 s). Not, though, when the model already falls short of the data: on the
+  tetrahedral FEM (MPSim's default for the thermal conductivity since 5.12.0) the resin films between touching
+  particles put the RVE below the mean field - 0.70-0.98 of it for the spheres of these examples at their true
+  values - so the RVE would fall shorter still. Otherwise the set that fits best is pre-selected with the reason (a
+  second unknown only for a clearly better fit), and the request's own stays a choice. A set with more unknowns
+  than distinct measurements is said to be undetermined, not "out of reach". Platelets, fibres and boxes enter the
+  model as ellipsoids in the orientation they are drawn with (MPSim 5.12.0): randomly oriented BN platelets of
+  aspect 0.2 in epoxy come within −1 and +8 % of the RVE, platelets lying in a silicone pad +20 % in the plane
+  (taken as spheres up to 0.3.10: −28, −46 and −53 %, and "BN 열전도도 보정해줘" was answered with the resin's
+  conductivity; now the BN's runs as asked and finds 23.9 W/m·K in one round, 2767 s, from data the RVE made at
+  25). When no set reaches the data on the model and the fillers are platelets, fibres or aligned, the request runs
+  as asked and the RVE decides. Example: "에폭시에 실리카 20%일 때 0.35 W/mK, 40%일 때 0.62 W/mK 측정됐어.
+  계면저항 보정해줘" - an interfacial resistance can only lower the conduction, and the model with fused silica
+  already falls 27 % short of the data, so the filler's conductivity is recommended; it finds 6.56 W/m·K in one
+  round (109 s) and the reply notes that this is close to the library's crystalline silica (6.5) - the data are the
+  RVE's own at silica k 6.5.
+- **Until it reaches the data.** A result that does not reach the data is read. The model of the property is
+  corrected by what the RVE gave at the estimate, every candidate is fitted on it - the same unknowns over a moved
+  range, and every other set - and the best one that reaches the data with plausible material values is run (a
+  fitted resin value within 0.5-2 times its library value, a filler's within 0.1-10 times; a resistance anywhere in
+  its range). When none is sure to on the model, the most promising set not run yet is run once on the RVE, which
+  decides. Each set runs a few times at most, so the candidates run out; there is no fixed number of rounds.
+- **Matrix k with R_int.** A series of contents may need the resin's conductivity and R_int together: the RVE of
+  touching particles depends on the content otherwise than a mean field does (on the voxels it rises more steeply,
+  shared voxel faces conducting; on the tetrahedral FEM less steeply, resin films separating the particles: silicone
+  + AlN 30/40/50 vol%, RVE over model 0.89/0.80/0.70), so a set fitted on the model can leave one end of a series
+  short and the other over at once, which no single unknown corrects. The resin's k weighs most at low contents,
+  R_int (with R_c = 2·R_int) at high ones; the pair is one of the candidates.
+- **Platelets and fibres.** MPSim orients a particle's symmetry axis - a fibre's length, a platelet's normal - so
+  platelets said to lie in the plane ("면 방향으로 누운", "lying flat") have their axis along z and standing ones in the
+  plane (before 0.3.11 platelets were laid the other way round). Randomly oriented platelets or fibres exist only below
+  a content set by their aspect ratio - about pi/aspect for thin platelets (Eppenga & Frenkel 1984,
+  doi:10.1080/00268978400101951) and 3.3/aspect for rods (Onsager 1949, doi:10.1111/j.1749-6632.1949.tb27296.x);
+  above it a random packing crawls without reaching the content (40 wt% BN of aspect 20, 28 vol% against 16 %, stood
+  at a size scale of 0.85 after three hours), so such particles are laid in the plane when the request did not say
+  how they lie (the same sample packed in 6 s), and the summary says why.
+- **When nothing is left to change, the person is asked**, with what only they can decide: the aspect ratio of
+  platelets or fibres whose shape the request did not give in numbers (it sets how they conduct and no calibration
+  fits it), particles lying in the plane when they were measured in-plane and their orientation was not said,
+  another grade of the filler from the library (crystalline silica instead of fused silica, say), the content basis -
+  only when the request did not say it (a "vol%" or "wt%" written in the request is not offered back) - the closest
+  result as it stands, or to stop. The reply names the closest set and why it was not run. The answer - a click, or
+  words such as "종횡비 20", "면내 정렬", "결정질 실리카로", "wt%로", "가장 가까운 결과로" - changes the case (the sets
+  tried before may run again on it) or ends with the closest result, marked as not reaching the data. "멈춰" stops
+  it at once.
+- **Other properties.** For a CTE, a permittivity or a modulus the material value that property depends on is
+  fitted: the one the request names ("실리카 CTE 보정": the silica's CTE; "BN 열전도도 보정": the BN's conductivity;
+  "에폭시 열전도도와 계면저항 둘 다": both), otherwise the resin's own value. A closed form for spheres (Kerner for the
+  CTE, Maxwell Garnett for the permittivity, Mori-Tanaka for the modulus) does for them what the effective-medium
+  preview does for k: before the run it checks the request's own set and sets the run's range to hold the estimate;
+  after a run, corrected by the RVE, it chooses the next set and range directly. Example: "에폭시+실리카 50vol% CTE
+  측정값 21.1 ppm/K, 60vol%에서 12.0 ppm/K. 실리카 CTE 보정" - the silica's own CTE would have to be far from its
+  library value, and no set reproduces both contents on Kerner's form (the RVE's CTE falls more steeply with the
+  content: its touching particles hold each other), so the silica's CTE runs as asked; on the RVE it stays 13 %
+  short at 50 vol% even at 1 ppm/K. Corrected by that result, the closed form points to the resin's CTE, which finds
+  70.0 ppm/K in the second round (391 s for both; the data are the RVE's own at epoxy CTE 70 ppm/K). For an
+  electrical conductivity (no closed form) a range the estimate sat at the end of is widened up to the
+  physical limits, then each other set is run once, then the person is asked. MPSim's interface and contact
+  resistances act on the heat flow only, so a resistance asked for with other data is replaced, and the summary says
+  why.
+- **A fitted value is said with its library value** when the fit moved it ("silica k 3.05 is 2.2 times the input
+  1.38"); one more than three times off is flagged as hardly that material's own.
+- **A value the data only bound is said as a bound**: where the result stops depending on an unknown toward one end
+  of its range, the answer is "R_int ≤ 5.68·10⁻⁷ m²K/W (95 %; most probable 1.04·10⁻⁷)" rather than a single value
+  (epoxy + 10 µm alumina at 30 and 50 vol%, data the RVE made at 2·10⁻⁷: below about 10⁻⁷ the conductivity hardly
+  changes).
+- **Measurements as people write them.** "40, 50, 60vol%에서 각각 0.66, 0.93, 1.60 W/mK", "30 vol% and 50 vol% ...: 0.48
+  and 0.93 W/mK", "0.33 and 0.54 W/mK for ... 20 and 40 vol%", "유전율: 20vol% 2.83, 40vol% 3.13": one measurement
+  each, at its own content, in order. A material value equal to a measurement ("BN k = 0.41" from "20wt%일 때 0.41
   W/mK") is the measurement, not the material's. A conductivity measured in-plane ("면내 열전도도") is fitted along
   x, otherwise through the thickness.
 - R_c follows R_int (R_c = 2·R_int) on touching particles, as MPSim recommends, unless R_c is calibrated itself.
@@ -400,7 +449,12 @@ Mori-Tanaka, a percolation power law) with 3 % run-to-run scatter. A target the 
 must end "out of reach", and the same study with a target it can reach must end with a checked recipe that holds on
 the stand-in; an optimum must be within 8 % of the range of the best point of a grid. The 37 requests hold 31 studies (6 optimisations), the 20 later ones 15 (4): every loop ended as it must. Ten targets were beyond the stand-in in their ranges and stopped as out of reach; given a target it could reach, the same ten studies ended with a checked recipe that holds on it. Nine designs first extended their content range downwards (a ceiling on CTE or permittivity met with little filler).
 
-**Run end to end** (MPSim 5.6.4, in a browser, MPSim's own runs at Fast, the bundled model, no browser errors):
+**Run end to end** (MPSim 5.6.4, in a browser, MPSim's own runs at Fast, the bundled model, no browser errors). These
+runs solved the thermal conductivity on the voxels; since MPSim 5.12.0 it is solved on the tetrahedral mesh fitted to
+the particles, which gives dense conductive fillers a lower conductivity (5 µm alumina at 60 vol% in silicone with
+R_int 10⁻⁷ m²K/W: 1.60 against 2.35 W/m·K on the voxels), so the conductivity targets below would take more filler
+today. The loops themselves work
+the same way.
 
 | Request | What the loop did | Answer |
 |---|---|---|
@@ -423,11 +477,11 @@ answer says so instead of suggesting a higher content.
 
 ## Installation
 
-**PC without internet.** Download `AIMPSim-0.3.10-offline-win64.zip` from the
+**PC without internet.** Download `AIMPSim-0.3.11-offline-win64.zip` from the
 [latest release](https://github.com/HyoseokByun-opt/AIMPSim/releases/latest): MPSim with the AI tab, the model and its
 server, the Python runtime, every wheel and openEMS. Unzip to a short path such as `C:\AIMPSim`, run
 `1_INSTALL_OFFLINE.bat`, then `2_RUN_LOCAL.bat`. For the larger model, unzip
-`AIMPSim-0.3.10-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
+`AIMPSim-0.3.11-model-qwen3.5-4b-part1of2.zip` and `...part2of2.zip` into the same folder; the AI tab uses it from then on.
 
 **PC with internet and conda.**
 

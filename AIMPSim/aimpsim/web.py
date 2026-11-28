@@ -140,11 +140,23 @@ class Assistant:
         A whole request (a matrix and a filler with a content, or an analysis) is not an answer."""
         import re
         t = text.strip()
-        if re.fullmatch(r"(?:material|basis):[\w.-]+|stop", t):
+        if re.fullmatch(r"(?:material|basis|aspect|orient):[\w.-]+|stop|accept", t):
             return t
         low = t.lower()
         if re.search(r"멈춰|멈춤|중지|그만|\bstop\b|취소|cancel", low):
             return "stop"
+        # the closest result as it stands
+        if re.search(r"가장 가까운|이대로|그대로|그걸로|그 값으로|closest|\baccept|as it is|keep (?:it|that)", low):
+            return "accept"
+        # platelets lying in the plane: "면내 정렬", "누워 있어", "lying flat", "aligned in-plane"
+        if re.search(r"면\s*(?:내|방향)\s*(?:으로\s*)?정렬|수평\s*정렬|누워|누운|눕|lying\s+flat|aligned\s+in[- ]?plane|in[- ]plane\s+aligned", low):
+            return "orient:xy"
+        # the aspect ratio of platelets or fibres: "종횡비 20", "aspect ratio 20", "AR 20", "두께 1/20"
+        m = re.search(r"(?:종횡비|aspect(?:\s*ratio)?|\bar\b)\s*[:=]?\s*(\d+(?:\.\d+)?)", low)
+        if m:
+            v = float(m.group(1))
+            if v > 0:
+                return f"aspect:{(1.0 / v if v < 1 else v):g}"
         it = parse(t, self.lex)
         whole = (bool((it.get("matrix") or {}).get("id")) and any(f.get("content") for f in it.get("fillers") or [])) \
             or bool(it.get("analyses")) or len(t) > 60
@@ -245,18 +257,35 @@ def blueprint(assistant):
                     return jsonify({"ok": True, "action": "stop", "why": "asked",
                                     "text": "보정을 멈췄습니다." if ko else "The calibration was stopped."})
                 if not ans:
-                    return jsonify({"ok": True, "action": "ask", "why": "unclear", "options": CC.options(form, cal, lib),
-                                    "text": ("어느 쪽인지 알 수 없습니다. 아래에서 고르거나 재료 이름이나 wt%/vol%로 알려 주세요." if ko
-                                             else "That is not clear: choose below, or name a material or wt%/vol%.")})
+                    return jsonify({"ok": True, "action": "ask", "why": "unclear", "options": CC.options(form, cal, lib, lang),
+                                    "text": ("어느 쪽인지 알 수 없습니다. 아래에서 고르거나, 재료 이름·종횡비·'가장 가까운 결과로'처럼 알려 주세요." if ko
+                                             else "That is not clear: choose below, or name a material, an aspect ratio or "
+                                                  "'the closest result'.")})
+                if ans == "accept":
+                    # the closest result as it stands: the loop ends (and a study that follows it starts) with it
+                    out = {"action": "done", "why": "accepted"}
+                    out["text"] = CC.explain(out, cal.get("unknowns") or [], result, lang, form, lib)
+                    out["ok"] = True
+                    return jsonify(out)
                 form2, cal2 = CC.apply_answer(form, cal, ans, lib)
                 asked = [u.get("key") or u["path"] for u in cal.get("unknowns") or []]
                 chk = CC.precheck(form2, cal2, asked, lang) or {}
                 plans = chk.get("plans") or []
                 pick = plans[chk.get("choice", 0)] if plans else {"unknowns": cal.get("unknowns"), "keys": asked}
+                # the case changed (another grade, basis or shape): the sets tried on the old one may be tried again
                 out = {"action": "rerun", "why": "answer", "form": form2, "unknowns": pick["unknowns"],
-                       "keys": "+".join(pick["keys"]), "reachable": chk.get("reachable")}
+                       "keys": "+".join(pick["keys"]), "reachable": chk.get("reachable"), "said": cal2.get("said"),
+                       "reset_tried": True}
                 kind_, _, val_ = ans.partition(":")
-                shown = ((lib.get(val_) or {}).get("name") or val_) if kind_ == "material" else (f"{val_}%" if kind_ == "basis" else ans)
+                shown = ((lib.get(val_) or {}).get("name") or val_) if kind_ == "material" else (
+                    f"{val_}%" if kind_ == "basis" else (f"종횡비 {val_}" if ko else f"aspect ratio {val_}")
+                    if kind_ == "aspect" else (("면 방향 정렬" if ko else "particles lying in the plane")
+                                               if kind_ == "orient" else ans))
+                if kind_ == "aspect" and any((p.get("orientation") or {}).get("mode") != (q.get("orientation") or {}).get("mode")
+                                             for p, q in zip(form.get("phases") or [], form2.get("phases") or [])):
+                    # random orientation cannot hold this aspect ratio at this content (calcheck.crowded)
+                    shown += (", 이 함량에서는 무작위로 놓일 수 없어 면 방향으로 눕힘" if ko
+                              else ", lying in the plane: random orientation cannot hold it at this content")
                 if ko:
                     out["text"] = (f"{shown}(으)로 바꿔 다시 점검했습니다: "
                                    + ("측정에 닿는 조합으로 보정합니다." if chk.get("reachable")

@@ -199,6 +199,26 @@ def test_reader_checks(lex, host):
     def fl(it):
         return [(f.get("id"), (f.get("content") or {}).get("value")) for f in it["fillers"]]
     cases = [
+        # the model named the second filler for the first (0.3.11, the sampled exhaustive test): SiC twice, alumina
+        # left out - alumina comes back and the SiC copy with alumina's amount goes
+        ("액정폴리머에 큐브 알루미나 40vol% 1um와 탄화규소 10 vol% (구상, 10 마이크로) 넣은 복합재의 Dk와 CTE 구해줘",
+         {"matrix": {"material": "lcp"}, "fillers": [{"material": "sic", "percent": 40, "shape": "cube", "size_um": 1},
+                                                    {"material": "sic", "percent": 10, "shape": "cube", "size_um": 10}],
+          "analyses": ["dielectric", "cte"], "task": "run"},
+         lambda it, rep, r: sorted(fl(it)) == [("al2o3", 40.0), ("sic", 10.0)]
+         and {f["id"]: f.get("shape") for f in it["fillers"]} == {"al2o3": "cube", "sic": "sphere"},
+         "a filler the model wrote under another's name was kept twice"),
+        # the model gave each filler the other's amount: each percent written next to its name stands
+        ("에스유8에 20vol%의 판상 질화갈륨 5um 그리고 5부피%의 구형 카본블랙 1um 넣은 복합재의 방열 특성와 탄성계수 구해줘",
+         {"matrix": {"material": "su8"}, "fillers": [{"material": "gallium_nitride", "percent": 5, "shape": "platelet", "size_um": 5},
+                                                    {"material": "carbon_black", "percent": 20, "shape": "sphere", "size_um": 1}],
+          "analyses": ["thermal", "elastic"], "task": "run"},
+         lambda it, rep, r: sorted(fl(it)) == [("carbon_black", 5.0), ("gan", 20.0)], "swapped contents were kept"),
+        # ... but a sentence that pairs them by order is the model's to read
+        ("silica and alumina at 20 and 30 vol% respectively in epoxy, thermal conductivity",
+         {"matrix": {"material": "epoxy"}, "fillers": [{"material": "silica", "percent": 20}, {"material": "alumina", "percent": 30}],
+          "analyses": ["thermal"], "task": "run"},
+         lambda it, rep, r: sorted(fl(it)) == [("al2o3", 30.0), ("sio2", 20.0)], "an order-paired reading was overruled"),
         # a filler the sentence does not name, and a number it does not hold
         ("열전도 높은 방열 패드 만들고 싶은데 뭘 넣어야 할지 모르겠어",
          {"matrix": {"material": "silicone"}, "fillers": [{"material": "al2o3", "percent": 60}], "analyses": ["thermal"],
@@ -667,6 +687,77 @@ def test_calibration_ai(lex, host):
     if done["action"] != "done" or "결정질 실리카" not in CC.explain(done, cal2["unknowns"], res_ok, "ko", form, lex.library) \
             and "quartz" not in CC.explain(done, cal2["unknowns"], res_ok, "ko", form, lex.library):
         errs.append(f"calibration done: {done} / {CC.explain(done, cal2['unknowns'], res_ok, 'ko', form, lex.library)}")
+    # a series of contents the RVE rises through more steeply than the data (the RVE of the EN example, 2026-11-26:
+    # R_int 6.0e-8 gave 0.535 at 30 % and 1.40 at 50 % against 0.62 and 1.35): no single unknown moves the two
+    # samples apart, the resin's k with R_int does (it reached them on the RVE within 2 %)
+    r4 = planner.resolve(parse("Measured k of epoxy with 30 vol% and 50 vol% spherical alumina (10 um): 0.62 and 1.35 W/mK. "
+                               "Calibrate the interfacial resistance.", lex), {"_auto": True})
+    f4, c4 = planner._filled(r4["payload"]["form"]), r4["payload"]["cal"]
+    res4 = {"unknowns": [{"path": "phases.0.r_int", "label": "R_int", "map": 6.026e-8, "lo": 1e-9, "hi": 1e-5, "edge": None,
+                          "unreached": True, "unit": "m²K/W"}],
+            "measurements": [{"label": "30%", "measured": 0.62, "direct": 0.5352, "residual_sigma": -2.79},
+                             {"label": "50%", "measured": 1.35, "direct": 1.396, "residual_sigma": 0.64}]}
+    nx4 = CC.next_round(f4, c4, c4["unknowns"], res4, ["r_int"], "en")
+    if nx4["action"] != "rerun" or sorted((nx4.get("keys") or "").split(":")[0].split("+")) != ["matrix_k", "r_int"]:
+        errs.append(f"calibration next round (contents apart): {nx4.get('action')} {nx4.get('keys')} {nx4.get('why')}")
+    # the question at the end: a basis the request said is not offered back; platelets without an aspect ratio are
+    # offered one; the closest result and stop are always there
+    r5 = planner.resolve(parse("실리콘에 구형 알루미나 5um 40vol%, 50vol%, 60vol%에서 열전도도가 각각 0.9, 1.4, 2.3 W/mK로 측정됐어요. "
+                               "계면저항을 보정해줘", lex), {"_auto": True})
+    ids5 = [o["id"] for o in CC.options(planner._filled(r5["payload"]["form"]), r5["payload"]["cal"], lex.library, "ko")]
+    if any(i.startswith("basis:") for i in ids5) or "accept" not in ids5 or "stop" not in ids5:
+        errs.append(f"calibration options (vol% said): {ids5}")
+    r6 = planner.resolve(parse("에폭시에 판상 BN 20wt%일 때 1.1 W/mK, 40wt%일 때 2.6 W/mK 실측. BN 열전도도 보정해줘", lex), {"_auto": True})
+    f6, c6 = planner._filled(r6["payload"]["form"]), r6["payload"]["cal"]
+    ids6 = [o["id"] for o in CC.options(f6, c6, lex.library, "ko")]
+    if not any(i.startswith("aspect:") for i in ids6) or any(i.startswith("basis:") for i in ids6):
+        errs.append(f"calibration options (platelets, wt% said): {ids6}")
+    f6b, c6b = CC.apply_answer(f6, c6, "aspect:20", lex.library)
+    if abs(f6b["phases"][0]["size"]["aspect"] - 0.05) > 1e-9 or any(o["id"].startswith("aspect:")
+                                                                    for o in CC.options(f6b, c6b, lex.library, "ko")):
+        errs.append(f"calibration answer (aspect): {f6b['phases'][0]['size']}")
+    # MPSim orients a particle's symmetry axis: a fibre's length, but a platelet's normal. Platelets said to lie in
+    # the plane have their axis along z; standing up, in the xy plane (MPSim: "a platelet aligned with z lies in the
+    # xy plane"). Fibres take the words as they are.
+    f6c, _ = CC.apply_answer(f6, c6, "orient:xy", lex.library)
+    if f6c["phases"][0]["orientation"]["mode"] != "z":
+        errs.append(f"calibration answer (platelets lying in plane): {f6c['phases'][0]['orientation']}")
+    for text, shape, want in (("에폭시에 BN 판상 20% 수직으로 세워서 열전도", "spheroid", "xy"),
+                              ("실리콘 BN 판상 30% 면내로 눕혀서 열전도", "spheroid", "z"),
+                              ("에폭시에 탄소섬유 지름 7um 길이 70um 10% 수직으로 세워서 열전도", "cylinder", "z"),
+                              ("에폭시에 탄소섬유 지름 7um 길이 70um 10% 면내로 눕혀서 열전도", "cylinder", "xy")):
+        ph = [p for p in planner.resolve(parse(text, lex), {"_auto": True})["payload"]["form"]["phases"]
+              if p.get("shape") == shape]
+        if not ph or ph[0]["orientation"]["mode"] != want:
+            errs.append(f"orientation of {shape}: {text} -> {ph[0]['orientation'] if ph else 'no phase'}")
+    # random orientation holds platelets of aspect a only below about pi/a vol% (Eppenga & Frenkel): 40 wt% BN
+    # (28 vol%) of aspect 20 is laid in the plane, aspect 10 stays random; said "random", it stays and is cautioned
+    if f6b["phases"][0]["orientation"]["mode"] != "z":
+        errs.append(f"calibration answer (aspect 20 at 28 vol% lies in the plane): {f6b['phases'][0]['orientation']}")
+    lab6 = {o["id"]: o["label"] for o in CC.options(f6, c6, lex.library, "ko")}
+    if "누움" not in lab6.get("aspect:20", "") or "누움" in lab6.get("aspect:10", "누움"):
+        errs.append(f"calibration options (crowded aspects): {lab6}")
+    for text, want, note in (("에폭시에 판상 BN 40wt% 종횡비 20, 열전도", "z", "면 방향으로 눕혀"),
+                             ("에폭시에 판상 BN 40wt% 종횡비 20 무작위 배향, 열전도", "iso", "오래 걸리거나"),
+                             ("실리콘에 판상 질화붕소 30wt% 종횡비 10, 열전도도 3방향", "iso", None)):
+        r = planner.resolve(parse(text, lex), {"_auto": True})
+        ph = r["payload"]["form"]["phases"][0]
+        got = [n for n in r["notes"] if "무작위로 놓일 수 없습니다" in n]
+        if ph["orientation"]["mode"] != want or (note and not any(note in n for n in got)) or (not note and got):
+            errs.append(f"crowded platelets: {text} -> {ph['orientation']} {got}")
+    from aimpsim.web import Assistant
+    a = Assistant(host)
+    for text, want in (("종횡비 20으로 해봐", "aspect:20"), ("aspect ratio 50", "aspect:50"), ("가장 가까운 결과로 마쳐줘", "accept"),
+                       ("keep it as it is", "accept"), ("wt%로", "basis:wt")):
+        if a.loop_answer(text, "ko") != want:
+            errs.append(f"calibration answer words: {text} -> {a.loop_answer(text, 'ko')}")
+    # a CTE calibration: the closed form (Kerner) finds that the silica's own CTE would have to be many times its
+    # library value, recommends the resin's, and starts the run on a range that holds the estimate
+    r7 = planner.resolve(parse("에폭시+실리카 60vol% CTE 측정값 22 ppm/K, 70vol%에서 15 ppm/K. 실리카 CTE 보정", lex), {"_auto": True})
+    u7 = r7["payload"]["cal"]["unknowns"]
+    if [u.get("key") for u in u7] != ["matrix_alpha"] or not any(q["id"] == "cal_plan" for q in r7["questions"]) \
+            or not u7[0]["lo"] < 65.0 < u7[0]["hi"]:
+        errs.append(f"calibration precheck (CTE): {[(u.get('key'), u['lo'], u['hi']) for u in u7]}")
     return errs
 
 

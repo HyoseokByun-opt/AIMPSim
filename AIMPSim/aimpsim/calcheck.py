@@ -68,9 +68,11 @@ def unknown_entry(key, form, i=0, wide=False):
                 "unit": "Ω·m²", "lo": 1e-17 if not wide else 1e-19, "hi": 1e-11 if not wide else 1e-9, "scale": "log",
                 "links": []}
     if key == "filler_k":
+        # as asked: the span a filler's own value may take (PLAUSIBLE, 0.1-10 x the library value: grades, purity,
+        # porosity) - 2 x left a silica grade of 3 W/m·K (2.2 x) for a second round
         k = float(pp.get("k") or 1.0)
         return {"key": key, "path": f"phases.{i}.props.k", "label": f"{name}: thermal conductivity", "unit": "W/m·K",
-                "lo": _r3(k * (0.5 if wide else 0.1)), "hi": _r3(k * (30.0 if wide else 2.0)), "scale": "log", "links": []}
+                "lo": _r3(k * (0.5 if wide else 0.1)), "hi": _r3(k * (30.0 if wide else 10.0)), "scale": "log", "links": []}
     if key == "matrix_k":
         k = float(mp.get("k") or 0.2)
         return {"key": key, "path": "matrix.props.k", "label": f"{mname}: thermal conductivity", "unit": "W/m·K",
@@ -178,24 +180,92 @@ def _key(*a):
     return json.dumps(a, sort_keys=True, default=str)
 
 
-PLANS = [("r_int",), ("filler_k",), ("matrix_k",), ("filler_k", "matrix_k"), ("filler_k", "r_int")]
-# the sets of unknowns tried in turn for another property (no effective-medium check: each is run)
+# The sets of unknowns tried for a conductivity. matrix_k + r_int is the pair a series of contents may need: the
+# RVE of touching particles depends on the content otherwise than a mean field does (on the voxels it rises more
+# steeply - shared voxel faces conduct; on the tetrahedral FEM less steeply - resin films separate the particles:
+# silicone + AlN 30/40/50 vol%, RVE / model 0.89 / 0.80 / 0.70), so a set fitted on the model can leave one end of
+# a content series short and the other over at once - no single unknown moves both ways; the resin's k weighs most
+# at low contents, R_int (with R_c following it) at high ones. Found on the voxel examples 2026-11-26: R_int alone,
+# the filler's k, the resin's k and filler + resin k all missed by 13-20 % on the RVE; matrix k + R_int reached
+# within 5 %. On the FEM (2026-11-28) every example reached with the single unknown it planned.
+PLANS = [("r_int",), ("filler_k",), ("matrix_k",), ("matrix_k", "r_int"), ("filler_k", "matrix_k"),
+         ("filler_k", "r_int")]
+# the sets of unknowns tried for another property, judged on its closed form (QUICK_MODEL)
 PLANS_OF = {"alpha": [("matrix_alpha",), ("filler_alpha",), ("matrix_alpha", "filler_alpha")],
             "eps_r": [("matrix_eps_r",), ("filler_eps_r",), ("matrix_eps_r", "filler_eps_r")],
             "E": [("matrix_E",), ("filler_E",), ("matrix_E", "filler_E")],
             "sigma": [("filler_sigma",), ("matrix_sigma",)]}
+EXTRA_UNKNOWN = 0.03     # an extra unknown is taken only when it fits better by more than this (relative miss)
+TRY_ANYWAY = 0.30        # nothing within TOL on the model: the best set still within this is run on the RVE once
+# a fitted material value counts as that material's own within these factors of its library value; beyond them the
+# fit stands for something the model lacks (the shape, the grade, the basis) and the set is not chosen by itself
+PLAUSIBLE = {("matrix", "k"): (0.5, 2.0), ("filler", "k"): (0.1, 10.0)}
+PLAUSIBLE_DEFAULT = (1.0 / 3.0, 3.0)
+
+
+def _plausible(form, unk, est):
+    """Whether every fitted material value of a set lies within PLAUSIBLE of the value it started from."""
+    for u, v in zip(unk, est):
+        parts = (u.get("path") or "").split(".")
+        if len(parts) < 3 or parts[-2] != "props" or v is None:
+            continue                         # a resistance: any value in its range is a resistance
+        prop = parts[-1]
+        who = "matrix" if parts[0] == "matrix" else "filler"
+        ent = form.get("matrix") if who == "matrix" else (form.get("phases") or [{}])[int(parts[1])]
+        try:
+            r = float(v) / float(((ent or {}).get("props") or {})[prop])
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+        lo, hi = PLAUSIBLE.get((who, prop), PLAUSIBLE_DEFAULT)
+        if not lo <= r <= hi:
+            return False
+    return True
+
+
+def _score(t):
+    k = t["keys"]
+    n = t.get("n") or (len(k) if isinstance(k, (list, tuple)) else len(str(k).split(":")[0].split("+")))
+    return t["miss"] + EXTRA_UNKNOWN * (n - 1)
+
+
+def _choose(tried, bounds_ok=True, rve_below=False):
+    """(choice, ok, asked_close) before any RVE run. The request's own set runs when the model reaches the data
+    with it (miss <= TOL), and also when it comes within TRY_ANYWAY with plausible, determined values: the model has
+    not been corrected by an RVE yet, and a mean field and an RVE of touching particles differ by 15-30 % - the
+    first round on the RVE corrects it, and the request is not overruled by the model's own error. Not, though,
+    when the error can only take the RVE further away: on the tetrahedral FEM (rve_below) the resin films between
+    touching particles put the RVE 2-30 % below the mean field (every example of 2026-11-28 at its true values:
+    spheres 0.70-0.98 of the model, BN platelets 0.83-1.01), so a set whose fit stays short of the data
+    (`short`) does not reach them on the RVE either. Otherwise the set that fits best with plausible values."""
+    ok = [i for i, t in enumerate(tried) if t["miss"] is not None and t["miss"] <= TOL and not t.get("underdetermined")
+          and t.get("plausible", True)]
+    a = tried[0] if tried else {}
+    close = (bounds_ok and a.get("miss") is not None and a["miss"] <= TRY_ANYWAY and not a.get("underdetermined")
+             and a.get("plausible", True) and not (rve_below and a.get("short")))
+    if 0 in ok or close:
+        return 0, ok, bool(close and 0 not in ok)
+    return (min(ok, key=lambda i: _score(tried[i])) if ok else 0), ok, False
 
 
 def precheck(form, cal, asked, lang="en"):
     """{rows, plans, choice, asked_ok, text} for a calibration about to run.
-    asked: the unknown keys of the request (r_int, r_contact, filler_k)."""
+    asked: the unknown keys of the request (r_int, r_contact, filler_k).
+    Every set is tried on the model; the request's own is run when it reaches the data with values the materials
+    can have, otherwise the set that fits best (an extra unknown only for a clearly better fit)."""
     k = _key(form, cal, asked)
     if k in _CACHE:
         return copy.deepcopy(_CACHE[k])
+    props = {m.get("property") for m in cal.get("measurements") or []}
+    if props and "k" not in props:
+        out = _precheck_quick(form, cal, asked)
+        if out is not None:
+            _CACHE[k] = copy.deepcopy(out)
+        return out
     rows = _bounds(form, cal)
     if rows is None or not rows or len(rows) != len(cal.get("measurements") or []):
         return None
-    plans = [tuple(asked)] + [p for p in PLANS if p != tuple(asked) and len(p) <= len(cal["measurements"])]
+    n = _n_meas(cal)
+    plans = [tuple(asked)] + [p for p in PLANS if p != tuple(asked) and len(p) <= n]
     tried = []
     for p in plans:
         unk = [unknown_entry(x, form, wide=p != tuple(asked)) for x in p]
@@ -204,25 +274,300 @@ def precheck(form, cal, asked, lang="en"):
             tried.append({"keys": list(p), "miss": None, "unknowns": unk})
             continue
         miss, fit, pv = r
-        und = bool((pv.get("identifiability") or {}).get("underdetermined"))
+        und = bool((pv.get("identifiability") or {}).get("underdetermined")) or len(p) > n
+        est = [s["map"] for s in pv.get("unknowns") or []]
+        # the model's best still below a measurement by more than TOL
+        short = any(f < float(m["value"]) * (1.0 - TOL) for f, m in zip(fit, cal.get("measurements") or []))
         tried.append({"keys": list(p), "miss": miss, "fit": fit, "unknowns": unk, "underdetermined": und,
-                      "estimate": {u["label"]: s["map"] for u, s in zip(unk, pv.get("unknowns") or [])}})
-        if miss <= TOL and not und:
-            break                      # the first set that reaches the data (the request's own first)
-    ok = [i for i, t in enumerate(tried) if t["miss"] is not None and t["miss"] <= TOL and not t.get("underdetermined")]
-    choice = 0 if 0 in ok else (ok[0] if ok else 0)
+                      "plausible": _plausible(form, unk, est), "short": short,
+                      "estimate": {u["label"]: v for u, v in zip(unk, est)}})
     above = [r for r in rows if r["value"] > r["parallel"] * 1.05]
-    out = {"rows": rows, "plans": tried, "choice": choice, "asked_ok": 0 in ok, "reachable": bool(ok),
-           "above": [r["label"] for r in above]}
+    fem = _fem_thermal(form)
+    choice, ok, close = _choose(tried, bounds_ok=not above, rve_below=fem)
+    out = {"rows": rows, "plans": tried, "choice": choice, "asked_ok": 0 in ok, "asked_close": close,
+           "reachable": bool(ok) or close, "above": [r["label"] for r in above], "model": "emt", "fem": fem}
     _CACHE[k] = copy.deepcopy(out)
     return out
 
 
+def _fem_thermal(form):
+    """Whether MPSim solves this case's thermal conductivity on the body-fitted tetrahedral FEM (its default since
+    5.12.0; voxels for what the mesh cannot carry, or when the case asks for them)."""
+    mp = _mp()
+    if mp is None:
+        return False
+    CA, _DOE, S = mp
+    try:
+        from mpsim import pipeline as PL
+        return PL.thermal_backend(S.normalize(CA.fill_props(form)), "puma").partition("+")[0] == "tet"
+    except Exception:                                                # noqa: BLE001
+        return False
+
+
+def _n_meas(cal):
+    """The measurements that tell unknowns apart: one per sample (content and property) measured."""
+    seen = set()
+    for m in cal.get("measurements") or []:
+        st = m.get("set") or []
+        st = tuple(sorted((s["path"], float(s["value"])) for s in st)) if isinstance(st, list) else tuple(sorted(st.items()))
+        seen.add((m.get("property"), m.get("direction"), st))
+    return len(seen)
+
+
+# ---------------------------------------------------------------------- closed forms for the other properties
+# What the conductivity's effective-medium preview does for k, these do for the other properties a calibration
+# fits: a closed form for spheres, corrected by what the RVE gave (scale), tells which set of unknowns reaches the
+# data and about where - so the next calibration starts on the right range, instead of widening ten times per
+# round (one 14-minute round each for the silica CTE example).
+QUICK_MODEL = {"alpha": "Kerner", "eps_r": "Maxwell Garnett", "E": "Mori-Tanaka"}
+
+
+def _kg(p):
+    E = float(p.get("E") or 1.0)
+    nu = min(0.499, max(0.0, float(p.get("nu") if p.get("nu") is not None else 0.3)))
+    return E / (3.0 * (1.0 - 2.0 * nu)), E / (2.0 * (1.0 + nu))
+
+
+def quick_value(row, prop):
+    """The closed form of prop for one sample: row = {matrix: props, phases: [(vf, props)]}; None if none."""
+    m = row["matrix"]
+    ph = [(v, p) for v, p in row["phases"] if v > 0]
+    phi = sum(v for v, _ in ph)
+    try:
+        if prop == "eps_r":
+            e = float(m["eps_r"])
+            b = sum(v * (float(p["eps_r"]) - e) / (float(p["eps_r"]) + 2.0 * e) for v, p in ph)
+            return e * (1.0 + 2.0 * b) / (1.0 - b)
+        if prop in ("alpha", "E"):
+            Km, Gm = _kg(m)
+            if phi <= 0:
+                return float(m["alpha"] if prop == "alpha" else m["E"])
+            kgs = [(v, *_kg(p), float(p.get("alpha") or 0.0)) for v, p in ph]
+            Kf = sum(v * k for v, k, _, _ in kgs) / phi
+            Gf = sum(v * g for v, _, g, _ in kgs) / phi
+            if prop == "E":
+                fm = Gm * (9 * Km + 8 * Gm) / (6 * (Km + 2 * Gm))
+                K = Km + phi * (Kf - Km) / (1 + (1 - phi) * (Kf - Km) / (Km + 4 * Gm / 3))
+                G = Gm + phi * (Gf - Gm) / (1 + (1 - phi) * (Gf - Gm) / (Gm + fm))
+                return 9 * K * G / (3 * K + G)
+            # Kerner (1956): the expansion of spheres in a matrix
+            af = sum(v * k * a for v, k, _, a in kgs) / sum(v * k for v, k, _, _ in kgs)
+            am = float(m["alpha"])
+            mean = (1 - phi) * am + phi * af
+            return mean - (am - af) * (1 - phi) * phi * (1 / Km - 1 / Kf) / ((1 - phi) / Kf + phi / Km + 3 / (4 * Gm))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+    return None
+
+
+def _quick_rows(form, cal):
+    """Per measurement: the sample's matrix and fillers (volume fractions, properties) - the content basis and the
+    densities resolved once by MPSim (they do not change with the unknowns)."""
+    mp = _mp()
+    if mp is None:
+        return None
+    CA, DOE, S = mp
+    base = CA.fill_props(form)
+    rows = []
+    for m in cal.get("measurements") or []:
+        f = copy.deepcopy(base)
+        st = m.get("set") or []
+        for path, v in (st.items() if isinstance(st, dict) else ((s["path"], s["value"]) for s in st)):
+            DOE.set_path(f, path, float(v))
+        try:
+            sp = S.normalize(f)
+        except ValueError:
+            return None
+        rows.append({"prop": m["property"], "value": float(m["value"]), "label": m.get("label"),
+                     "matrix": dict(sp["matrix"]["props"]),
+                     "phases": [(0.0 if p.get("void") else float(p["vf"]), dict(p.get("props") or {})) for p in sp["phases"]]})
+    return rows
+
+
+def _quick_at(rows, unk, theta):
+    out = []
+    for r in rows:
+        rr = {"matrix": dict(r["matrix"]), "phases": [(v, dict(p)) for v, p in r["phases"]]}
+        for u, t in zip(unk, theta):
+            parts = u["path"].split(".")
+            prop = parts[-1]
+            if parts[0] == "matrix":
+                rr["matrix"][prop] = t
+            else:
+                rr["phases"][int(parts[1])][1][prop] = t
+        out.append(quick_value(rr, r["prop"]))
+    return out
+
+
+def _quick_fit(rows, unk, scale=None):
+    """The unknowns' values that bring the closed form (times scale) closest to every measurement, on a grid over
+    their widest ranges: (worst relative miss, values, computed) or None."""
+    import itertools
+    import numpy as np
+    axes = []
+    for u in unk:
+        lim_lo, lim_hi = _limits(u)
+        if u["scale"] == "log":
+            lo, hi = max(lim_lo, u["lo"] / 100.0), min(lim_hi, u["hi"] * 100.0)
+        else:
+            lo, hi = u["lo"], u["hi"]
+        n = 161 if len(unk) == 1 else 41
+        axes.append(np.exp(np.linspace(math.log(max(lo, 1e-30)), math.log(hi), n)) if u["scale"] == "log" and lo > 0
+                    else np.linspace(lo, hi, n))
+    best = None
+    for theta in itertools.product(*axes):
+        y = _quick_at(rows, unk, theta)
+        if any(v is None or not v > 0 for v in y):
+            continue
+        if scale:
+            y = [v * c for v, c in zip(y, scale)]
+        miss = max(abs(v / r["value"] - 1.0) for v, r in zip(y, rows))
+        if best is None or miss < best[0]:
+            best = (miss, [float(t) for t in theta], y)
+    return best
+
+
+def _around(u, v, f=3.0):
+    """An unknown's range about a value (a factor f each way, within the physical limits)."""
+    u = dict(u)
+    lim_lo, lim_hi = _limits(u)
+    if u["scale"] == "log" and v > 0:
+        u["lo"], u["hi"] = max(lim_lo, _r3(v / f)), min(lim_hi, _r3(v * f))
+    else:
+        span = max(abs(u["hi"] - u["lo"]), 1e-9)
+        u["lo"], u["hi"] = max(lim_lo, v - 0.5 * span), min(lim_hi, v + 0.5 * span)
+    return u
+
+
+def _quick_plans(form, cal, plans, asked, scale=None):
+    rows = _quick_rows(form, cal)
+    if not rows or any(quick_value(r, r["prop"]) is None for r in rows):
+        return None, rows
+    n = _n_meas(cal)
+    tried = []
+    for p in plans:
+        unk = [unknown_entry(x, form, wide=tuple(p) != tuple(asked)) for x in p]
+        if not all(unk):
+            continue
+        r = _quick_fit(rows, unk, scale)
+        if r is None:
+            tried.append({"keys": list(p), "miss": None, "unknowns": unk})
+            continue
+        miss, th, y = r
+        # the run's range: the request's own range, stretched to hold the estimate with room on either side
+        run = []
+        for u, v in zip(unk, th):
+            a = _around(u, v)
+            if tuple(p) == tuple(asked) and scale is None:
+                a["lo"], a["hi"] = min(u["lo"], a["lo"]), max(u["hi"], a["hi"])
+            run.append(a)
+        tried.append({"keys": list(p), "miss": miss, "fit": y, "unknowns": run, "underdetermined": len(p) > n,
+                      "plausible": _plausible(form, unk, th), "estimate": {u["label"]: v for u, v in zip(unk, th)}})
+    return tried, rows
+
+
+def _precheck_quick(form, cal, asked):
+    """The precheck of a CTE, permittivity or modulus calibration on the closed form (QUICK_MODEL)."""
+    props = {m.get("property") for m in cal.get("measurements") or []}
+    if len(props) != 1 or next(iter(props)) not in QUICK_MODEL:
+        return None
+    prop = next(iter(props))
+    n = _n_meas(cal)
+    plans = [tuple(asked)] + [p for p in PLANS_OF[prop] if p != tuple(asked) and len(p) <= n]
+    tried, rows = _quick_plans(form, cal, plans, asked)
+    if not tried:
+        return None
+    choice, ok, close = _choose(tried)
+    lib_rows = [{"label": r["label"], "value": r["value"], "model": quick_value(r, prop)} for r in rows]
+    return {"rows": lib_rows, "plans": tried, "choice": choice, "asked_ok": 0 in ok, "asked_close": close,
+            "reachable": bool(ok) or close, "above": [], "model": QUICK_MODEL[prop], "property": prop}
+
+
+def _name(kk):
+    return str(kk).split(":")[0]
+
+
+SAME_SET_RUNS = 3        # one set of unknowns is run at most this often (its ranges moved in between)
+
+
+def _emt_scale(form, cal, unknowns, rows, th):
+    """Per measurement: what the RVE gave over the mean field at the estimate (the contacts the RVE has)."""
+    mp = _mp()
+    if mp is None:
+        return None
+    CA = mp[0]
+    job = job_of(form, cal, unknowns)
+    try:
+        from mpsim import doe as DOE
+        from mpsim import spec as S
+        import numpy as np
+        base = CA.fill_props(form)
+        U = [CA._Unknown(u) for u in job["unknowns"]]
+        scale = []
+        for m, r in zip(job["measurements"], rows):
+            f = copy.deepcopy(base)
+            for path, v in (m.get("set") or {}).items():
+                DOE.set_path(f, path, v)
+            sp = S.normalize(CA._set_theta(f, U, th))
+            emt = float(CA._theory_model(sp, U, np.array([th]), m.get("direction") or "z")[0])
+            direct = float(r.get("direct") or 0.0)
+            scale.append(direct / emt if emt > 0 and direct > 0 else 1.0)
+        return scale
+    except Exception:                                                # noqa: BLE001
+        return None
+
+
+def _widened(unknowns, summ, factor):
+    """The same unknowns with the range widened (times factor) at the end the estimate sat on: (unknowns, moved)."""
+    wid, moved = [], False
+    for u, s in zip(unknowns, summ):
+        u = dict(u)
+        span = math.log(u["hi"] / u["lo"]) if u["scale"] == "log" and u["lo"] > 0 else (u["hi"] - u["lo"])
+        at_lo = s.get("edge") in ("low", "both") or _near(float(s["map"]), u["lo"], span, u["scale"])
+        at_hi = s.get("edge") in ("high", "both") or _near(float(s["map"]), u["hi"], span, u["scale"])
+        lim_lo, lim_hi = _limits(u)
+        if at_lo and u["lo"] > lim_lo * 1.0001:
+            u["lo"] = max(lim_lo, _r3(u["lo"] / factor) if u["scale"] == "log" else u["lo"] - 0.5 * span)
+            moved = True
+        if at_hi and u["hi"] < lim_hi * 0.9999:
+            u["hi"] = min(lim_hi, _r3(u["hi"] * factor) if u["scale"] == "log" else u["hi"] + 0.5 * span)
+            moved = True
+        wid.append(u)
+    return wid, moved
+
+
+def _ranges(unk):
+    return ",".join(f"{u['lo']:.3g}-{u['hi']:.3g}" for u in unk)
+
+
+def _pick(scored, tried_keys, names_tried):
+    """The set to run next: the best that reaches the data on the corrected model with values the materials can
+    have (an extra unknown only for a clearly better fit); failing that, the most promising set not run yet, once -
+    the corrected model is only a guide, the RVE decides."""
+    runs = {}
+    for k in tried_keys:
+        runs[_name(k)] = runs.get(_name(k), 0) + 1
+    live = [t for t in scored if t["keys"] not in tried_keys and runs.get(_name(t["keys"]), 0) < SAME_SET_RUNS
+            and not t["und"] and t["miss"] is not None]
+    ok = [t for t in live if t["miss"] <= TOL and t["plausible"]]
+    if ok:
+        return min(ok, key=_score)
+    new = [t for t in live if t["miss"] <= TRY_ANYWAY and t["plausible"] and _name(t["keys"]) not in names_tried]
+    if new:
+        t = min(new, key=_score)
+        return dict(t, why="promising")
+    return None
+
+
 def next_round(form, cal, unknowns, result, tried_keys, lang="en", library=None):
     """What to run after a calibration result: {action: done | rerun | ask | stop, unknowns, why}.
-    There is no fixed number of rounds: a range is widened while the estimate sits at its end (up to the
-    physical limits) and the other sets of unknowns are tried once each, so the candidates run out; then the
-    person is asked (options) - another grade of the filler, the other content basis, or to stop."""
+    The result is read like the calibration tab reads it; the model of the property (the effective-medium preview
+    for k, a closed form for the CTE, the permittivity and the modulus) is corrected by what the RVE gave at the
+    estimate, and every candidate - the same unknowns over a moved range, and every other set the measurements can
+    tell apart - is fitted on it. The best that reaches the data with values the materials can have is run; when
+    none does, the most promising set not run yet is run once. When nothing is left, the person is asked (options):
+    the particle shape, another grade, the content basis when it was not said, the closest result, or to stop.
+    There is no fixed number of rounds: each set is run a few times at most, so the candidates run out."""
     summ = result.get("unknowns") or []
     rows = result.get("measurements") or []
     unreached = any(u.get("unreached") for u in summ)
@@ -231,93 +576,81 @@ def next_round(form, cal, unknowns, result, tried_keys, lang="en", library=None)
         return {"action": "done", "why": "reached"}
     mp = _mp()
     props = {m.get("property") for m in cal.get("measurements") or []}
-    if mp is None or props != {"k"}:
-        # another property (no effective-medium check): the range the estimate sat at the end of is widened
-        # while it can be (up to the physical limits), then each other set of unknowns of that property is
-        # run once; then the person is asked
-        keys = "+".join(u.get("key") or u["path"] for u in unknowns)
-        wid, moved = [], False
-        for u, s in zip(unknowns, summ):
-            u = dict(u)
-            span = math.log(u["hi"] / u["lo"]) if u["scale"] == "log" and u["lo"] > 0 else (u["hi"] - u["lo"])
-            lim_lo, lim_hi = _limits(u)
-            if (s.get("edge") in ("low", "both") or _near(float(s["map"]), u["lo"], span, u["scale"])) and u["lo"] > lim_lo * 1.0001:
-                u["lo"] = max(lim_lo, _r3(u["lo"] / 10.0) if u["scale"] == "log" else u["lo"] - 0.5 * span)
-                moved = True
-            if (s.get("edge") in ("high", "both") or _near(float(s["map"]), u["hi"], span, u["scale"])) and u["hi"] < lim_hi * 0.9999:
-                u["hi"] = min(lim_hi, _r3(u["hi"] * 10.0) if u["scale"] == "log" else u["hi"] + 0.5 * span)
-                moved = True
-            wid.append(u)
-        wkey = keys + ":" + ",".join(f"{u['lo']:.3g}-{u['hi']:.3g}" for u in wid)
+    prop = next(iter(props)) if len(props) == 1 else None
+    keys = "+".join(u.get("key") or u["path"] for u in unknowns)
+    names_tried = {_name(k) for k in tried_keys} | {keys}
+    th = [float(s["map"]) for s in summ]
+    n = _n_meas(cal)
+    scored, scale, model = [], None, None
+    if mp is not None and props == {"k"}:
+        model = "emt"
+        scale = _emt_scale(form, cal, unknowns, rows, th)
+        cands = []
+        wid, moved = _widened(unknowns, summ, 100.0)
+        if moved:
+            cands.append((keys + ":" + _ranges(wid), wid, "widened"))
+        for p in PLANS:
+            kk = "+".join(p)
+            if kk in names_tried or len(p) > n:
+                continue
+            cands.append((kk, [unknown_entry(x, form, wide=True) for x in p], "switched"))
+        for kk, unk, how in cands:
+            r = _try(form, cal, unk, scale)
+            if r is None:
+                continue
+            miss, fit, pv = r
+            est = [s["map"] for s in pv.get("unknowns") or []]
+            scored.append({"keys": kk, "unknowns": unk, "why": how, "miss": miss, "est": est,
+                           "plausible": _plausible(form, unk, est), "n": len(unk), "fit": fit,
+                           "und": bool((pv.get("identifiability") or {}).get("underdetermined")) or len(unk) > n})
+    elif mp is not None and prop in QUICK_MODEL:
+        rq = _quick_rows(form, cal)
+        y0 = _quick_at(rq, unknowns, th) if rq else None
+        if y0 and all(v is not None and v > 0 for v in y0) and all(float(r.get("direct") or 0) > 0 for r in rows):
+            model = QUICK_MODEL[prop]
+            scale = [float(r["direct"]) / v for r, v in zip(rows, y0)]
+            own = tuple(u.get("key") or u["path"] for u in unknowns)
+            for p in [own] + [q for q in PLANS_OF[prop] if q != own and len(q) <= n]:
+                unk = [unknown_entry(x, form, wide=True) for x in p]
+                if not all(unk):
+                    continue
+                r = _quick_fit(rq, unk, scale)
+                if r is None:
+                    continue
+                miss, est, y = r
+                run = [_around(u, v) for u, v in zip(unk, est)]
+                scored.append({"keys": "+".join(p) + ":" + _ranges(run), "unknowns": run, "miss": miss, "est": est,
+                               "why": "widened" if p == own else "switched", "plausible": _plausible(form, unk, est),
+                               "n": len(unk), "fit": y, "und": len(p) > n})
+    if model is None:
+        # no model of the property (the electrical conductivity): the range the estimate sat at the end of is
+        # widened while it can be, then each other set of unknowns of that property is run once
+        wid, moved = _widened(unknowns, summ, 10.0)
+        wkey = keys + ":" + _ranges(wid)
         if moved and wkey not in tried_keys:
             return {"action": "rerun", "unknowns": wid, "keys": wkey, "why": "widened", "miss": None}
-        prop = next(iter(props)) if len(props) == 1 else None
         for p in PLANS_OF.get(prop, []):
             kk = "+".join(p)
-            if kk == keys or kk in tried_keys or len(p) > len(cal["measurements"]):
+            if kk in names_tried or len(p) > n:
                 continue
             unk = [unknown_entry(x, form, wide=True) for x in p]
             if all(unk):
                 return {"action": "rerun", "unknowns": unk, "keys": kk, "why": "switched", "miss": None}
-        return {"action": "ask", "why": "no_plan", "options": options(form, cal, library)}
-    CA = mp[0]
-    # what the RVE gave over the mean field at the estimate: the contacts the RVE has
-    th = [float(s["map"]) for s in summ]
-    scale = []
-    job = job_of(form, cal, unknowns)
-    try:
-        from mpsim import doe as DOE
-        from mpsim import spec as S
-        base = CA.fill_props(form)
-        U = [CA._Unknown(u) for u in job["unknowns"]]
-        import numpy as np
-        for m, r in zip(job["measurements"], rows):
-            f = copy.deepcopy(base)
-            for path, v in (m.get("set") or {}).items():
-                DOE.set_path(f, path, v)
-            sp = S.normalize(CA._set_theta(f, U, th))
-            emt = float(CA._theory_model(sp, U, np.array([th]))[0])
-            direct = float(r.get("direct") or 0.0)
-            scale.append(direct / emt if emt > 0 and direct > 0 else 1.0)
-    except Exception:                                                # noqa: BLE001
-        scale = None
-    cands = []
-    # the same unknowns, the range widened where the estimate sat at its end
-    wid = []
-    moved = False
-    for u, s in zip(unknowns, summ):
-        u = dict(u)
-        span = math.log(u["hi"] / u["lo"]) if u["scale"] == "log" and u["lo"] > 0 else (u["hi"] - u["lo"])
-        at_lo = s.get("edge") in ("low", "both") or _near(float(s["map"]), u["lo"], span, u["scale"])
-        at_hi = s.get("edge") in ("high", "both") or _near(float(s["map"]), u["hi"], span, u["scale"])
-        lim_lo, lim_hi = _limits(u)
-        if at_lo and u["lo"] > lim_lo * 1.0001:
-            u["lo"] = max(lim_lo, _r3(u["lo"] / 100.0) if u["scale"] == "log" else u["lo"] - span)
-            moved = True
-        if at_hi and u["hi"] < lim_hi * 0.9999:
-            u["hi"] = min(lim_hi, _r3(u["hi"] * 100.0) if u["scale"] == "log" else u["hi"] + span)
-            moved = True
-        wid.append(u)
-    keys = "+".join(u.get("key") or u["path"] for u in unknowns)
-    # widened again and again while the estimate sits at an end - up to the physical limits, so the loop ends
-    wkey = keys + ":" + ",".join(f"{u['lo']:.3g}-{u['hi']:.3g}" for u in wid)
-    if moved and wkey not in tried_keys:
-        cands.append((wkey, wid, "widened"))
-    for p in PLANS:
-        kk = "+".join(p)
-        if kk == keys or kk in tried_keys or len(p) > len(cal["measurements"]):
-            continue
-        cands.append((kk, [unknown_entry(x, form, wide=True) for x in p], "switched"))
-    for kk, unk, how in cands:
-        r = _try(form, cal, unk, scale)
-        if r is None:
-            continue
-        miss, fit, pv = r
-        if miss <= TOL and not (pv.get("identifiability") or {}).get("underdetermined"):
-            return {"action": "rerun", "unknowns": unk, "keys": kk, "why": how, "miss": miss,
-                    "estimate": {u["label"]: s["map"] for u, s in zip(unk, pv.get("unknowns") or [])},
-                    "scale": scale}
-    return {"action": "ask", "why": "no_plan", "scale": scale, "options": options(form, cal, library)}
+        return {"action": "ask", "why": "no_plan", "options": options(form, cal, library, lang)}
+    pick = _pick(scored, tried_keys, names_tried)
+    if pick is not None:
+        return {"action": "rerun", "unknowns": pick["unknowns"], "keys": pick["keys"], "why": pick["why"],
+                "miss": pick["miss"], "model": model, "scale": scale,
+                "estimate": {u["label"]: v for u, v in zip(pick["unknowns"], pick["est"])}}
+    # nothing left to run: the closest set on the corrected model, and why it is not run
+    close = sorted([t for t in scored if t["miss"] is not None], key=lambda t: t["miss"])
+    closest = None
+    if close:
+        t = close[0]
+        closest = {"keys": _name(t["keys"]), "miss": t["miss"], "plausible": t["plausible"],
+                   "estimate": {u["label"]: v for u, v in zip(t["unknowns"], t["est"])}}
+    return {"action": "ask", "why": "no_plan", "scale": scale, "model": model, "closest": closest,
+            "options": options(form, cal, library, lang)}
 
 
 # the widest range an unknown is widened to: beyond them a value is not a material's
@@ -330,13 +663,151 @@ def _limits(u):
     return _LIMITS.get(key, (u["lo"] / 1e3 if u["lo"] > 0 else u["lo"] - 1e3, u["hi"] * 1e3))
 
 
-def options(form, cal, library=None):
-    """What only the person can decide when no set of unknowns reaches the data:
-    another grade of the filler (a library entry of the same family with a
-    different value), the other content basis, or to stop."""
+# the aspect ratios offered for platelets and fibres whose shape the request did not give in numbers
+ASPECTS = {"platelet": (10, 20, 50), "fiber": (5, 20, 50)}
+
+
+def axis_mode(said, ph):
+    """MPSim's orientation mode for how the particles are said to lie. The words name the particle: "lying in the
+    plane" (xy) or "standing up / aligned through the thickness" (z). MPSim orients a particle's symmetry axis, which
+    for a fibre or a needle is its length but for a platelet (spheroid c/a < 1) is the normal of the plate: a platelet
+    lying in the xy plane has its axis along z, and one standing up has its axis in the xy plane."""
+    if said not in ("xy", "z"):
+        return said
+    sz = ph.get("size") or {}
+    if ph.get("shape") == "spheroid" and float(sz.get("aspect") or 1.0) < 1.0:
+        return "z" if said == "xy" else "xy"
+    return said
+
+
+# Randomly oriented platelets or fibres exist only below a content set by their aspect ratio: thin platelets order
+# above rho*D^3 ≈ 4, a volume fraction of about pi/aspect (Eppenga & Frenkel 1984), rods above about 3.3/aspect
+# (Onsager 1949). Above it a random packing is crowded - the placement jams and the clump relaxation crawls without
+# reaching the content (a 40 wt% BN of aspect 20, 28 vol% against a limit of 16 %, stood at a size scale of 0.85
+# after 90,000 steps; laid in the plane, the same sample packed in 6 s by one random placement round) - and real
+# films and pads hold such particles lying in the plane.
+ISO_LIMIT = {"platelet": math.pi, "fiber": 3.3}
+
+
+def _vf_max(form, sets=()):
+    """The highest volume fraction each phase takes: the form's own content and every set of values (a measurement's
+    sample, the top of a DOE range), the basis and densities resolved by MPSim. None without MPSim."""
+    mp = _mp()
+    if mp is None:
+        return None
+    CA, DOE, S = mp
+    try:
+        base = CA.fill_props(form)
+    except Exception:                                                # noqa: BLE001
+        return None
+    best = None
+    for st in [[]] + [list(s) for s in sets or []]:
+        f = copy.deepcopy(base)
+        try:
+            for path, v in st:
+                DOE.set_path(f, path, float(v))
+            vf = [0.0 if p.get("void") else float(p["vf"]) for p in S.normalize(f)["phases"]]
+        except Exception:                                            # noqa: BLE001
+            continue
+        best = vf if best is None else [max(a, b) for a, b in zip(best, vf)]
+    return best
+
+
+def _sets_of(cal=None, doe=None):
+    """The sets of values a case takes: each measurement's sample, and the top of each content range of a DOE."""
+    out = []
+    for m in (cal or {}).get("measurements") or []:
+        st = m.get("set") or []
+        out.append(list(st.items()) if isinstance(st, dict) else [(s["path"], s["value"]) for s in st])
+    for p in (doe or {}).get("parameters") or []:
+        if str(p.get("path", "")).endswith("fraction.value") and p.get("max") is not None:
+            out.append([(p["path"], p["max"])])
+    return out
+
+
+def crowded(form, cal=None, doe=None, aspect=None):
+    """Phases of platelets or fibres, randomly oriented, at more than the content random orientation allows:
+    [{"i", "shape", "aspect", "vf", "limit"}]. `aspect` tries another aspect ratio for every such phase."""
+    out = []
+    vf = None
+    for i, ph in enumerate(form.get("phases") or []):
+        shape, ar = _shape_of(ph)
+        if not shape or ((ph.get("orientation") or {}).get("mode") or "iso") != "iso":
+            continue
+        ar = float(aspect or ar or 0.0)
+        if ar <= 1.0:
+            continue
+        if vf is None:
+            vf = _vf_max(form, _sets_of(cal, doe)) or []
+        if i < len(vf) and vf[i] > ISO_LIMIT[shape] / ar:
+            out.append({"i": i, "shape": shape, "aspect": ar, "vf": vf[i], "limit": ISO_LIMIT[shape] / ar})
+    return out
+
+
+def lay_in_plane(form, cr):
+    """The crowded phases lying in the xy plane (in place)."""
+    for c in cr:
+        ph = form["phases"][c["i"]]
+        ph.setdefault("orientation", {})["mode"] = axis_mode("xy", ph)
+    return form
+
+
+def crowded_note(cr, lang="en", laid=True):
+    """What crowded() found: laid in the plane, or (the request said random) a caution."""
+    ko = lang == "ko"
+    out = []
+    for c in cr:
+        what = (f"{'판상' if c['shape'] == 'platelet' else '섬유'} 입자(종횡비 {c['aspect']:g})는 {100 * c['vf']:.0f} vol%에서 "
+                f"무작위로 놓일 수 없습니다(한계 약 {100 * c['limit']:.0f} vol%)" if ko else
+                f"{'platelets' if c['shape'] == 'platelet' else 'fibres'} of aspect ratio {c['aspect']:g} cannot lie at "
+                f"random at {100 * c['vf']:.0f} vol% (limit about {100 * c['limit']:.0f} vol%)")
+        if laid:
+            what += ": 면 방향으로 눕혀 배치합니다" if ko else ": they are placed lying in the plane"
+        else:
+            what += (": 말씀하신 무작위 배향으로는 배치가 아주 오래 걸리거나 함량에 닿지 않을 수 있습니다" if ko else
+                     ": with the random orientation asked for, the placement may take very long or miss the content")
+        out.append(what)
+    return "; ".join(out)
+
+
+def _shape_of(ph):
+    sz = ph.get("size") or {}
+    if ph.get("shape") == "spheroid" and float(sz.get("aspect") or 1.0) < 1.0:
+        return "platelet", 1.0 / float(sz["aspect"])
+    if ph.get("shape") == "cylinder" and sz.get("length") and sz.get("d"):
+        return "fiber", float(sz["length"]) / float(sz["d"])
+    return None, None
+
+
+def options(form, cal, library=None, lang="en"):
+    """What only the person can decide when no set of unknowns reaches the data: the aspect ratio of platelets or
+    fibres whose shape was not given in numbers (it sets how they conduct and no calibration fits it), another grade
+    of the filler (a library entry of the same family with a different value), the content basis when the request
+    did not say it (a basis it said is not offered back), the closest result as it stands, or to stop."""
+    ko = lang == "ko"
     out = []
     library = library or {}
+    said = cal.get("said") or {}
     ph = (form.get("phases") or [{}])[0]
+    shape, ar = _shape_of(ph)
+    # platelets or fibres measured in-plane, their orientation not said: lying in the plane, as a pad or a film
+    # made by casting or pressing usually holds them (random orientation conducts the same in every direction)
+    inplane = any((m.get("direction") or "z") in ("x", "y") for m in cal.get("measurements") or [])
+    if shape and inplane and not said.get("orientation") and ((ph.get("orientation") or {}).get("mode") or "iso") == "iso":
+        out.append({"id": "orient:xy", "label": ("입자가 면 방향으로 누워 정렬 (패드·필름에서 흔함)" if ko else
+                                               "particles lying in the plane (usual in pads and films)")})
+    if shape and not (said.get("aspect") or [False])[0]:
+        for a in ASPECTS[shape]:
+            if ar and abs(a / ar - 1.0) < 0.2:
+                continue
+            # an aspect ratio random orientation cannot hold at this content: the particles are laid in the plane
+            flat = not said.get("orientation") and bool(crowded(form, cal, aspect=a))
+            out.append({"id": f"aspect:{a:g}", "label": ((f"판상 종횡비 {a:g} (두께 = 지름/{a:g})" if shape == "platelet"
+                                                          else f"섬유 종횡비 {a:g} (길이 = 지름×{a:g})")
+                                                         + (", 이 함량에서는 면 방향으로 누움" if flat else "")) if ko else
+                        ((f"platelets of aspect ratio {a:g} (thickness = diameter/{a:g})" if shape == "platelet"
+                          else f"fibres of aspect ratio {a:g} (length = {a:g} diameters)")
+                         + (", lying in the plane at this content" if flat else ""))})
     mid = ph.get("material_id")
     me = library.get(mid) or {}
     props = {m.get("property") for m in cal.get("measurements") or []}
@@ -350,11 +821,15 @@ def options(form, cal, library=None):
         ov = (o.get("props") or {}).get(prop)
         if words & ow and ov is not None and (v0 is None or abs(float(ov) / float(v0) - 1.0) > 0.2):
             out.append({"id": f"material:{oid}", "label": f"{o.get('name') or oid} ({prop} {float(ov):g})"})
-    basis = (ph.get("fraction") or {}).get("basis") or "vol"
-    out.append({"id": "basis:" + ("wt" if basis == "vol" else "vol"),
-                "label": "wt%" if basis == "vol" else "vol%"})
+    if not said.get("basis"):
+        basis = (ph.get("fraction") or {}).get("basis") or "vol"
+        out.append({"id": "basis:" + ("wt" if basis == "vol" else "vol"),
+                    "label": ("함량을 wt%로 보기" if basis == "vol" else "함량을 vol%로 보기") if ko else
+                    ("the contents as wt%" if basis == "vol" else "the contents as vol%")})
+    out = out[:5]
+    out.append({"id": "accept", "label": "가장 가까운 결과로 마치기" if ko else "finish with the closest result"})
     out.append({"id": "stop", "label": "stop"})
-    return out[:6]
+    return out
 
 
 def apply_answer(form, cal, answer, library=None):
@@ -374,6 +849,25 @@ def apply_answer(form, cal, answer, library=None):
         b = answer.split(":", 1)[1]
         for ph in form.get("phases") or []:
             ph.setdefault("fraction", {})["basis"] = b
+        cal.setdefault("said", {})["basis"] = True
+    elif answer.startswith("aspect:"):
+        a = float(answer.split(":", 1)[1])
+        for ph in form.get("phases") or []:
+            shape, _ = _shape_of(ph)
+            sz = ph.setdefault("size", {})
+            if shape == "platelet":
+                sz["aspect"] = round(1.0 / a, 6)
+            elif shape == "fiber":
+                sz["length"] = round(float(sz["d"]) * a, 6)
+        cal.setdefault("said", {})["aspect"] = [True] * len(form.get("phases") or [])
+        if not cal["said"].get("orientation"):
+            lay_in_plane(form, crowded(form, cal))
+    elif answer.startswith("orient:"):
+        mode = answer.split(":", 1)[1]
+        for ph in form.get("phases") or []:
+            if _shape_of(ph)[0]:
+                ph.setdefault("orientation", {})["mode"] = axis_mode(mode, ph)
+        cal.setdefault("said", {})["orientation"] = True
     return form, cal
 
 
@@ -444,22 +938,92 @@ def explain(out, old, result, lang="en", form=None, library=None):
     L = lambda a, b: a if ko else b                                               # noqa: E731
     summ = result.get("unknowns") or []
     rows = result.get("measurements") or []
-    vals = "; ".join(f"{s['label']} = {float(s['map']):.3g} {s.get('unit', '')}".strip() for s in summ)
+
+    def val(s):
+        """An estimate as the data give it: a value, or a bound where the result stops depending on it (the
+        posterior does not fall to zero at that end of the range - R_int far below what matters)."""
+        u = s.get("unit") or ""
+        u = "" if u.strip() in ("-", "—", "–") else " " + u
+        v, ci, edge = f"{float(s['map']):.3g}", s.get("ci95") or [None, None], s.get("edge")
+        if edge in ("low", "high") and ci[1 if edge == "low" else 0] is not None:
+            b = float(ci[1 if edge == "low" else 0])
+            if edge == "low":
+                return L(f"{s['label']} ≤ {b:.3g}{u} (95 %; 가장 가능성 높은 값 {v} - 그보다 작으면 결과가 거의 변하지 않아 "
+                         f"측정으로는 상한만 정해짐)",
+                         f"{s['label']} ≤ {b:.3g}{u} (95 %; most probable {v} - below it the result hardly changes, so "
+                         f"the data give an upper bound)")
+            return L(f"{s['label']} ≥ {b:.3g}{u} (95 %; 가장 가능성 높은 값 {v} - 그보다 크면 결과가 거의 변하지 않아 "
+                     f"측정으로는 하한만 정해짐)",
+                     f"{s['label']} ≥ {b:.3g}{u} (95 %; most probable {v} - above it the result hardly changes, so "
+                     f"the data give a lower bound)")
+        return f"{s['label']} = {v}{u}"
+    vals = "; ".join(val(s) for s in summ)
     near = ", ".join(f"{r.get('label')}: {L('측정', 'measured')} {float(r['measured']):.3g}, RVE {float(r['direct']):.3g}"
                      for r in rows if r.get("direct") is not None)
-    if out["action"] == "done":
+    if out["action"] == "done" and out.get("why") != "accepted":
         alike = look_alike(form or {}, summ, library or {}, lang) if form and library else ""
         # a value far from its library entry is noted, unless another grade in the library explains it already
         far = far_from_library(form or {}, [s for s in summ if s["label"] not in alike], library or {}, lang)
-        return L(f"보정이 측정에 닿았습니다. {vals}. ({near})", f"The calibration reaches the data: {vals} ({near}).") + alike + far
+        # a material value moved by the fit, said with its library value (silicone k 0.303: 1.5 times 0.2)
+        moved = []
+        for s in summ:
+            parts = (s.get("path") or "").split(".")
+            if form and len(parts) >= 3 and parts[-2] == "props" and s["label"] not in alike + far:
+                ent = form.get("matrix") if parts[0] == "matrix" else (form.get("phases") or [{}])[int(parts[1])]
+                try:
+                    lv = float(((ent or {}).get("props") or {})[parts[-1]])
+                    r = float(s["map"]) / lv
+                except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                    continue
+                if abs(r - 1.0) >= 0.2 and 1 / 3 <= r <= 3:
+                    moved.append(L(f"{s['label']}은 입력값 {lv:g}의 {r:.2g}배", f"{s['label']} is {r:.2g} times the input {lv:g}"))
+        mv = (L(" 보정으로 바뀐 재료값: ", " Material values the fit moved: ") + "; ".join(moved) + ".") if moved else ""
+        return L(f"보정이 측정에 닿았습니다. {vals}. ({near})", f"The calibration reaches the data: {vals} ({near}).") + mv + alike + far
+    model = out.get("model")
+    mname = {"emt": L("유효매질 모델", "effective-medium model")}.get(model) or (
+        L(f"{model} 식", f"{model} closed form") if model else L("모델", "model"))
     if out["action"] == "ask":
-        return L(f"측정에 닿지 않았습니다 ({near}). 범위를 더 넓힌 경우와 아직 해 보지 않은 보정 대상을, 이번 RVE 결과로 보정한 "
-                 f"유효매질 모델로 시험했지만 측정에 닿는 조합이 없습니다. 재료 등급이나 함량 기준이 입력과 다를 수 있습니다. "
-                 f"아래에서 고르거나, 직접 알려 주세요(예: '결정질 실리카로', 'wt%로').",
-                 f"The data were not reached ({near}). A wider range and the unknowns not yet tried were tested on the "
-                 f"effective-medium model corrected by this RVE result, and nothing reaches the data: the material grade or "
-                 f"the content basis may differ from the input. Choose below, or say what to change (e.g. 'crystalline "
-                 f"silica', 'wt%').")
+        c = out.get("closest") or {}
+        why = ""
+        if c:
+            ce = ", ".join(f"{k} ≈ {v:.3g}" for k, v in (c.get("estimate") or {}).items())
+            miss = 100 * c["miss"]
+            if not c.get("plausible"):
+                why = L(f" 가장 가까운 조합({ce})은 모델에서 측정과 {miss:.0f}% 차이로 맞지만, 재료값이 라이브러리 값과 너무 멀어 "
+                        f"그 재료의 값이라 보기 어려우므로 돌리지 않았습니다.",
+                        f" The closest set ({ce}) comes within {miss:.0f} % on the model, but only with material values "
+                        f"far from the library's - hardly those materials' own - so it was not run.")
+            else:
+                why = L(f" 가장 가까운 조합({ce})은 모델에서 측정과 {miss:.0f}% 차이이고, 이미 돌려 보았습니다.",
+                        f" The closest set ({ce}) is {miss:.0f} % from the data on the model and was run already.")
+        opts = out.get("options") or []
+        hint = []
+        if any(o["id"].startswith("orient:") for o in opts):
+            hint.append(L("면내로 측정한 판상·섬유 입자는 면 방향으로 누워 있으면 무작위 배향보다 면내 열전도가 크게 높습니다",
+                          "platelets or fibres measured in-plane conduct far better in the plane when they lie in it than "
+                          "when they are randomly oriented"))
+        if any(o["id"].startswith("aspect:") for o in opts):
+            hint.append(L("판상·섬유 입자의 종횡비는 보정으로 정할 수 없고 열전도에 크게 작용하므로, 실제 종횡비를 고르거나 알려 주세요",
+                          "the aspect ratio of platelets or fibres cannot be calibrated and governs how they conduct: choose "
+                          "or say the real one"))
+        if any(o["id"].startswith("material:") for o in opts):
+            hint.append(L("필러 등급이 다를 수 있습니다", "the filler grade may differ"))
+        if any(o["id"].startswith("basis:") for o in opts):
+            hint.append(L("함량 기준(vol/wt)이 다를 수 있습니다", "the content basis (vol/wt) may differ"))
+        return L(f"측정에 닿지 않았습니다 ({near}). 범위를 옮긴 경우와 측정으로 정할 수 있는 다른 보정 대상을, 이번 RVE 결과로 보정한 "
+                 f"{mname}로 모두 시험했지만 닿는 조합이 남아 있지 않습니다.{why} "
+                 + (" · ".join(hint) + ". " if hint else "")
+                 + "아래에서 고르거나 직접 알려 주세요. '가장 가까운 결과로 마치기'는 지금의 보정값을 측정에 닿지 않은 값으로 표시하고 마칩니다.",
+                 f"The data were not reached ({near}). A moved range and every other set of unknowns the measurements can "
+                 f"tell apart were tried on the {mname} corrected by this RVE result, and none is left that reaches "
+                 f"them.{why} " + ("; ".join(hint) + ". " if hint else "")
+                 + "Choose below or say what to change; 'finish with the closest result' keeps the present values, marked "
+                   "as not reaching the data.")
+    if out["action"] == "done" and out.get("why") == "accepted":
+        return L(f"측정에 닿지 않은 채 가장 가까운 결과로 마칩니다: {vals} ({near}). 이 값은 측정을 재현하지 않으므로, 쓰기 전에 "
+                 f"측정값과 재료·형상을 다시 확인하세요.",
+                 f"Finished with the closest result, which does not reach the data: {vals} ({near}). It does not "
+                 f"reproduce the measurements: check the values, the materials and the shape before using it.")
     if out["action"] == "stop" and out.get("why") == "rounds":
         return L(f"측정에 닿지 않았습니다 ({near}). AI가 범위와 대상을 바꿔 안전 한도({_rounds()}라운드)까지 다시 보정했지만 닿지 않아 멈춥니다. "
                  f"Calibration 탭의 'Every parameter set solved'와 측정값·함량 기준·재료 등급을 확인하세요.",
@@ -467,15 +1031,15 @@ def explain(out, old, result, lang="en", form=None, library=None):
                  f"without reaching them, so it stops: see 'Every parameter set solved' in the "
                  f"Calibration tab, and check the values, the content basis and the material grade.")
     if out["action"] == "stop":
-        return L(f"측정에 닿지 않았습니다 ({near}). 범위를 넓히거나 보정 대상을 바꿔도 유효매질 점검에서 측정에 닿는 조합이 없어 "
+        return L(f"측정에 닿지 않았습니다 ({near}). 범위를 넓히거나 보정 대상을 바꿔도 {mname} 점검에서 측정에 닿는 조합이 없어 "
                  f"멈춥니다. 측정값, 함량 기준(vol/wt), 재료 등급, 입자 크기를 확인하세요.",
                  f"The data were not reached ({near}). Neither a wider range nor other unknowns reach them on the "
-                 f"effective-medium check, so it stops here: check the values, the content basis (vol/wt), the "
+                 f"{mname} check, so it stops here: check the values, the content basis (vol/wt), the "
                  f"material grade and the particle size.")
     new = "; ".join(f"{u['label']} {u['lo']:.3g}~{u['hi']:.3g}" for u in out["unknowns"])
     est = ", ".join(f"{k} ≈ {v:.3g}" for k, v in (out.get("estimate") or {}).items())
     if out.get("miss") is None:
-        # another property than k: no effective-medium check, the next calibration is simply run
+        # no model of the property (the electrical conductivity): the next calibration is simply run
         if out.get("why") == "widened":
             return L(f"측정에 닿지 않았습니다 ({near}). 추정이 범위 끝에 걸려 있어 범위를 넓혀 다시 보정합니다: {new}.",
                      f"The data were not reached ({near}). The estimate sat at the end of its range, which is widened "
@@ -484,18 +1048,22 @@ def explain(out, old, result, lang="en", form=None, library=None):
         return L(f"측정에 닿지 않았습니다 ({near}). {olds}의 범위를 끝까지 넓혀도 닿지 않아 보정 대상을 바꿔 다시 보정합니다: {new}.",
                  f"The data were not reached ({near}). {olds} cannot reach them within physical limits, so other unknowns "
                  f"are calibrated: {new}.")
+    chk = L(f"RVE 결과로 보정한 {mname}에서 측정과 {100 * out['miss']:.1f}% 이내 ({est})",
+            f"on the {mname} corrected by the RVE it comes within {100 * out['miss']:.1f} % ({est})")
     if out.get("why") == "widened":
-        return L(f"측정에 닿지 않았습니다 ({near}). 추정이 범위 끝에 걸려 있어 범위를 넓혀 다시 보정합니다: {new}. "
-                 f"RVE와 유효매질 모델의 차이를 반영한 점검에서 측정과 {100 * out.get('miss', 0):.1f}% 이내 ({est}).",
-                 f"The data were not reached ({near}). The estimate sat at the end of its range, which is widened "
-                 f"and run again: {new}; on the effective-medium check corrected by the RVE it comes within "
-                 f"{100 * out.get('miss', 0):.1f} % ({est}).")
+        return L(f"측정에 닿지 않았습니다 ({near}). 같은 보정 대상의 범위를 추정이 있는 곳으로 옮겨 다시 보정합니다: {new}. {chk}.",
+                 f"The data were not reached ({near}). The same unknowns are run again over the range where the estimate "
+                 f"lies: {new}; {chk}.")
     olds = ", ".join(u["label"] for u in old)
-    return L(f"측정에 닿지 않았습니다 ({near}). {olds}만으로는 RVE와 유효매질 모델의 차이를 반영해도 닿지 않아 보정 대상을 바꿔 "
-             f"다시 보정합니다: {new}. 점검에서 측정과 {100 * out.get('miss', 0):.1f}% 이내 ({est}).",
-             f"The data were not reached ({near}). {olds} alone cannot reach them, also with the RVE's correction "
-             f"of the effective-medium model, so other unknowns are calibrated: {new}; the check comes within "
-             f"{100 * out.get('miss', 0):.1f} % ({est}).")
+    if out.get("why") == "promising":
+        return L(f"측정에 닿지 않았습니다 ({near}). {olds}만으로는 닿지 않습니다. 보정한 {mname}로는 어느 조합도 확실히 닿지 않지만, "
+                 f"가장 가까운 조합을 RVE로 한 번 보정해 봅니다: {new} (모델에서 측정과 {100 * out['miss']:.0f}% 차이, {est}).",
+                 f"The data were not reached ({near}). {olds} alone does not reach them. No set is sure to on the corrected "
+                 f"{mname}, so the closest is calibrated on the RVE once: {new} ({100 * out['miss']:.0f} % from the data "
+                 f"on the model, {est}).")
+    return L(f"측정에 닿지 않았습니다 ({near}). {olds}만으로는 닿지 않아 보정 대상을 바꿔 다시 보정합니다: {new}. {chk}.",
+             f"The data were not reached ({near}). {olds} alone cannot reach them, so other unknowns are calibrated: "
+             f"{new}; {chk}.")
 
 
 def _rounds():
