@@ -27,7 +27,7 @@
   "description": "MPSim with an AI tab: simulation requests in words, read by a local language model and checked against the sentence.",
   "applicationCategory": "ScientificApplication",
   "operatingSystem": "Windows 10, Windows 11",
-  "softwareVersion": "0.3.10",
+  "softwareVersion": "0.3.11",
   "license": "https://opensource.org/licenses/MIT",
   "url": "https://hyoseokbyun-opt.github.io/AIMPSim/",
   "downloadUrl": "https://github.com/HyoseokByun-opt/AIMPSim/releases/latest",
@@ -190,8 +190,8 @@
       <a class="btn" href="https://github.com/HyoseokByun-opt/AIMPSim/blob/main/AIMPSim/docs/GUIDE_KO.md">Guide (Korean)</a>
       <a class="btn" href="https://github.com/HyoseokByun-opt/AIMPSim">Source code</a>
     </div>
-    <div class="meta"><b>Version 0.3.10</b> · MIT License · Windows 10 / 11 · works offline ·
-      MPSim 5.11.0 inside</div>
+    <div class="meta"><b>Version 0.3.11</b> · MIT License · Windows 10 / 11 · works offline ·
+      MPSim 5.12.0 inside</div>
     <figure class="banner shotframe">
       <img src="assets/ai_tab.png" width="1500" height="950" fetchpriority="high"
            alt="The AI tab of MPSim: a casual request with a correction, read into a summary of what will run, with the questions and their recommended answers">
@@ -285,7 +285,8 @@
           <li>Calibrations of CTE, permittivity, modulus and electrical conductivity; measurements written as lists
             (<span lang="ko">"40, 50, 60vol%에서 각각 0.9, 1.4, 2.3 W/mK"</span>)</li></ul></div>
         <div class="card"><span class="tag ai">MPSim inside</span><h3>The newest MPSim in every release</h3>
-          <ul><li>MPSim 5.11.0 inside: a Sensitivity Analysis tab that asks 25 measures - statistics, machine learning with SHAP, Sobol, PCE, eFAST, Morris, DGSM, PAWN - which inputs of a DOE study move a response, alone and together; the results of a finite-element run drawn on the elements themselves; every phase with its own opacity and a Solo view of one filler of a blend</li>
+          <ul><li>MPSim 5.12.0 inside: the thermal conductivity on the tetrahedral mesh fitted to the particles by default, with the resin films between touching particles, R_int on the particles' true surface and R_c in series with the films; overlapping particles separated by a resin film, and an overlap Auto that grows a nearly packed structure in place and no further; the calibration loops of the AI tab run on it, with the particles' shape and orientation in the effective-medium check before a run</li>
+          <li>MPSim 5.11.0: a Sensitivity Analysis tab that asks 25 measures - statistics, machine learning with SHAP, Sobol, PCE, eFAST, Morris, DGSM, PAWN - which inputs of a DOE study move a response, alone and together; the results of a finite-element run drawn on the elements themselves; every phase with its own opacity and a Solo view of one filler of a blend</li>
           <li>MPSim 5.10.2: a structure analysed again without generating it - from a 3D TIFF or a particle list (CSV), the particle dynamics starting from its particles; every comparison with a published measurement or solution as a preset (24 benchmarks); conduction, stiffness and thermal expansion also by finite elements on a tetrahedral mesh fitted to
             the particles (lattice or graded by the particles' sizes, solved on all cores, drawn in 3D on the mesh), and a particle
             generator audited at 40-70 vol% for every shape - a structure that misses its loading is no longer solved</li></ul></div>
@@ -402,7 +403,7 @@
       <h2>Download and install</h2>
       <div class="two">
         <div class="card"><h3>PC without internet</h3>
-          <p>Download <code>AIMPSim-0.3.10-offline-win64.zip</code> from the
+          <p>Download <code>AIMPSim-0.3.11-offline-win64.zip</code> from the
           <a href="https://github.com/HyoseokByun-opt/AIMPSim/releases/latest">latest release</a>: MPSim with the AI tab, the
           model and its server, the Python runtime, every wheel and openEMS. Unzip to a short path such as
           <code>C:\AIMPSim</code>, run <code>1_INSTALL_OFFLINE.bat</code>, then <code>2_RUN_LOCAL.bat</code>.</p>
